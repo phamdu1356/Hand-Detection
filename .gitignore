@@ -1,0 +1,18 @@
+# Local datasets & YOLO training outputs
+Dataset/
+datasets/
+runs/
+
+# Local virtual environments & Python caches
+.venv/
+__pycache__/
+demo/__pycache__/
+*.py[cod]
+*$py.class
+
+# Pretrained / intermediate model weights (keep trained hand_pose.pt and hand_pose.onnx trackable)
+yolo11*.pt
+*.pt
+!hand_pose.pt
+*.onnx
+!hand_pose.onnx
