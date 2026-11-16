@@ -1,0 +1,14 @@
+services:
+  test:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    volumes:
+      # thư mục ảnh để thử: đặt ảnh vào demo/images
+      - ./images:/app/images
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+    devices:
+      - /dev/video0:/dev/video0
