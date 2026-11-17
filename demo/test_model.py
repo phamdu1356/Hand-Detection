@@ -52,6 +52,7 @@ GESTURE_TO_CMD = {
     "four": "YAW_LEFT (Xoay trai)",
     "like": "TAKEOFF (Cat canh)",
 }
+HEATMAP_GESTURE_CLASSES = ("palm", "fist", "ok", "one", "peace_inverted", "three", "four", "like")
 
 
 def load_cnn_model(path):
@@ -229,13 +230,41 @@ def _box_iou_xywh_tl(box_a, box_b):
     return inter / union
 
 
+def is_valid_hand_detection(det, min_palm_bone_px=2.0, min_kpts_valid=5, kpt_conf_thres=0.25):
+    """Lọc nhiễu False Positive: kiểm tra kích thước hộp, độ dài xương lòng bàn tay > 2px và số khớp hợp lệ."""
+    if det is None or det.get("box") is None or det.get("keypoints") is None:
+        return False
+    _, _, bw, bh = det["box"]
+    if bw < 4.0 or bh < 4.0:
+        return False
+    aspect = bw / max(bh, 1e-6)
+    if aspect < 0.18 or aspect > 5.5:
+        return False
+
+    kps = np.asarray(det["keypoints"], dtype=np.float32)
+    if kps.shape[0] < 21 or not _is_valid_kp(kps[0]) or not _is_valid_kp(kps[9]):
+        return False
+    palm_bone_len = float(np.linalg.norm(kps[9] - kps[0]))
+    if palm_bone_len <= float(min_palm_bone_px):
+        return False
+
+    kconf = det.get("kpt_conf")
+    if kconf is not None and len(kconf) >= 21:
+        valid_cnt = sum(
+            1 for k in range(21) if _is_valid_kp(kps[k]) and float(kconf[k]) > float(kpt_conf_thres)
+        )
+    else:
+        valid_cnt = sum(1 for k in range(21) if _is_valid_kp(kps[k]))
+    return valid_cnt >= int(min_kpts_valid)
+
+
 def build_pose_candidate_rois(
     person_boxes,
     body_kpts,
     body_kpt_confs,
     w_img,
     h_img,
-    min_crop=128,
+    min_crop=96,
     kpt_conf_thres=0.20,
     person_confs=None,
 ):
@@ -277,11 +306,11 @@ def build_pose_candidate_rois(
                     vec = w_pt - e_pt
                     forearm_len = float(np.linalg.norm(vec))
                     hx, hy = w_pt + 0.28 * vec
-                    crop_size = max(float(min_crop), 2.8 * forearm_len, 0.38 * ph)
+                    crop_size = max(float(min_crop), 2.0 * forearm_len, 0.24 * ph)
                     priority = 1.0 + p_conf + w_c
                 else:
                     hx, hy = float(w_pt[0]), float(w_pt[1])
-                    crop_size = max(float(min_crop), 0.42 * ph)
+                    crop_size = max(float(min_crop), 0.24 * ph)
                     priority = 0.8 + p_conf + w_c
 
                 crop_size = int(round(min(crop_size, float(max_side))))
@@ -294,7 +323,7 @@ def build_pose_candidate_rois(
                 upper_len = float(np.linalg.norm(vec_upper))
                 if upper_len > 4.0:
                     hx, hy = e_pt + 0.9 * vec_upper
-                    crop_size = int(round(min(max(float(min_crop), 2.8 * upper_len, 0.42 * ph), float(max_side))))
+                    crop_size = int(round(min(max(float(min_crop), 2.0 * upper_len, 0.24 * ph), float(max_side))))
                     rx = int(round(float(hx) - crop_size / 2.0))
                     ry = int(round(float(hy) - crop_size / 2.0))
                     candidates.append((rx, ry, crop_size, 0.45 + p_conf, f"{tag}_extrap"))
@@ -319,12 +348,12 @@ def build_pose_candidate_rois(
     return deduped
 
 
-def build_adaptive_tile_rois(w_img, h_img, tile_size=None, overlap=0.25):
+def build_adaptive_tile_rois(w_img, h_img, tile_size=None, overlap=0.30):
     """Sinh lưới cửa sổ vuông giao nhau (SAHI-style) cho Stage 1B khi không phát hiện được khung người."""
     w_img = int(w_img)
     h_img = int(h_img)
     if tile_size is None:
-        tile_size = max(256, min(448, int(round(w_img / 4.5))))
+        tile_size = max(160, min(280, int(round(w_img / 6.5))))
     tile_size = max(128, min(tile_size, max(w_img, h_img)))
     stride = max(64, int(round(tile_size * (1.0 - overlap))))
 
@@ -349,6 +378,66 @@ def build_adaptive_tile_rois(w_img, h_img, tile_size=None, overlap=0.25):
     return rois
 
 
+def _resolve_model_imgsz(model, default=640):
+    """Đọc imgsz tự động từ metadata của model (.pt / .onnx), mặc định 640."""
+    for src in (getattr(model, "overrides", None), getattr(getattr(model, "model", None), "args", None)):
+        if isinstance(src, dict) and src.get("imgsz"):
+            val = src["imgsz"]
+            return int(val[0] if isinstance(val, (list, tuple)) else val)
+    return int(default)
+
+
+def _load_heatmap_session(model_path):
+    """Nạp Stage-2B Refiner hand_kpts_heatmap.onnx qua ONNX Runtime (ưu tiên CUDA nếu khả dụng)."""
+    import onnxruntime as ort
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.log_severity_level = 3
+    avail = ort.get_available_providers()
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in avail else ["CPUExecutionProvider"]
+    try:
+        session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=providers)
+    except Exception:
+        session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=["CPUExecutionProvider"])
+
+    inp = session.get_inputs()[0]
+    in_shape = list(inp.shape)
+    in_h = int(in_shape[2]) if len(in_shape) >= 4 and isinstance(in_shape[2], int) else 192
+    in_w = int(in_shape[3]) if len(in_shape) >= 4 and isinstance(in_shape[3], int) else 192
+
+    coords_idx = None
+    logits_idx = None
+    outputs = session.get_outputs()
+    for idx, out in enumerate(outputs):
+        shp = list(out.shape)
+        if len(shp) == 3 and shp[1] == 21 and shp[2] == 2:
+            coords_idx = idx
+        elif len(shp) == 2 and shp[1] == len(HEATMAP_GESTURE_CLASSES):
+            logits_idx = idx
+
+    if coords_idx is None or logits_idx is None:
+        for idx, out in enumerate(outputs):
+            nm = out.name.lower()
+            if coords_idx is None and ("coord" in nm or "kpt" in nm or "point" in nm):
+                coords_idx = idx
+            elif logits_idx is None and ("logit" in nm or "gesture" in nm or "cls" in nm):
+                logits_idx = idx
+
+    if coords_idx is None:
+        coords_idx = 1 if len(outputs) >= 3 else 0
+    if logits_idx is None and len(outputs) >= 2:
+        logits_idx = len(outputs) - 1 if len(outputs) - 1 != coords_idx else None
+
+    meta = {
+        "input_name": inp.name,
+        "in_h": in_h,
+        "in_w": in_w,
+        "coords_idx": coords_idx,
+        "logits_idx": logits_idx,
+    }
+    return session, meta
+
+
 class OptimalFlycamController:
     """Bộ điều khiển Flycam tối ưu dùng 1 model YOLO11n-Pose + 2-Stage Adaptive ROI Zoom (fallback CNN nếu chưa có)."""
 
@@ -358,6 +447,7 @@ class OptimalFlycamController:
         cnn_path,
         pose_model_path=None,
         body_pose_model_path=None,
+        heatmap_model_path=None,
         far_field_mode="auto",
         high_res_width=1280,
         body_conf_thres=0.25,
@@ -370,6 +460,10 @@ class OptimalFlycamController:
         self.pose_model = None
         self.pose_model_path = None
         self.pose_is_onnx = False
+        self.pose_imgsz = 640
+        self.heatmap_session = None
+        self.heatmap_model_path = None
+        self.heatmap_meta = None
         self.body_pose_model = None
         self.body_pose_model_path = None
         self.body_is_onnx = False
@@ -411,13 +505,37 @@ class OptimalFlycamController:
             self.pose_model = YOLO(resolved_pose, task="pose")
             self.pose_model_path = resolved_pose
             self.pose_is_onnx = resolved_pose.lower().endswith(".onnx")
-            print(f"Đã nạp model tối ưu: {resolved_pose}")
+            self.pose_imgsz = _resolve_model_imgsz(self.pose_model, default=640)
+            print(f"Đã nạp model tối ưu: {resolved_pose} (imgsz={self.pose_imgsz})")
 
         if self.pose_model is None and cnn_path and os.path.exists(cnn_path) and not str(cnn_path).lower().endswith((".pt", ".onnx")):
             self.cnn_model = load_cnn_model(cnn_path)
             print(f"Chưa có hand_pose.pt, dùng tạm model CNN: {cnn_path}")
 
         demo_dir = os.path.dirname(os.path.abspath(__file__))
+        resolved_heatmap = None
+        if heatmap_model_path == "" or heatmap_model_path is False:
+            resolved_heatmap = None
+        elif heatmap_model_path and os.path.exists(str(heatmap_model_path)):
+            resolved_heatmap = str(heatmap_model_path)
+        elif heatmap_model_path is None:
+            for search_dir in (base_dir, demo_dir):
+                hp = os.path.join(search_dir, "hand_kpts_heatmap.onnx")
+                if os.path.exists(hp):
+                    resolved_heatmap = hp
+                    break
+
+        if resolved_heatmap is not None:
+            try:
+                self.heatmap_session, self.heatmap_meta = _load_heatmap_session(resolved_heatmap)
+                self.heatmap_model_path = resolved_heatmap
+                print(
+                    f"Đã nạp Stage-2B Heatmap Refiner: {resolved_heatmap} "
+                    f"({self.heatmap_meta['in_w']}x{self.heatmap_meta['in_h']})"
+                )
+            except Exception as exc:
+                print(f"[Cảnh báo] Không nạp được heatmap refiner ({resolved_heatmap}): {exc}")
+
         self._body_pose_candidates = []
         if body_pose_model_path:
             self._body_pose_candidates.append(body_pose_model_path)
@@ -505,13 +623,61 @@ class OptimalFlycamController:
                 }
         return best
 
-    def _run_pose_on_roi(self, frame, origin_x, origin_y, crop_size, conf_thres):
+    def _run_pose_on_roi_single(self, frame, origin_x, origin_y, crop_size, min_conf):
         h_img, w_img = frame.shape[:2]
         crop, (ox, oy, csize) = extract_square_roi(frame, origin_x, origin_y, crop_size)
-        res = self.pose_model.predict(crop, conf=conf_thres, imgsz=640, verbose=False)[0]
-        det = self._extract_top_hand_from_result(res, ox, oy, w_img, h_img, min_conf=conf_thres)
+        pose_imgsz = getattr(self, "pose_imgsz", 640)
+        res = self.pose_model.predict(crop, conf=min_conf, imgsz=pose_imgsz, verbose=False)[0]
+        det = self._extract_top_hand_from_result(res, ox, oy, w_img, h_img, min_conf=min_conf)
         if det is not None:
             det["roi"] = (ox, oy, csize)
+        return det
+
+    def _recenter_roi_if_boundary(self, frame, det, conf_thres):
+        if det is None or det.get("roi") is None:
+            return det, False
+        bx, by, bw, bh = det["box"]
+        rx, ry, rs = det["roi"]
+        margin = min(bx - rx, by - ry, (rx + rs) - (bx + bw), (ry + rs) - (by + bh)) / max(float(rs), 1.0)
+        cx_h, cy_h = bx + bw / 2.0, by + bh / 2.0
+        off = max(abs(cx_h - (rx + rs / 2.0)), abs(cy_h - (ry + rs / 2.0))) / max(float(rs), 1.0)
+        if margin < 0.12 or off > 0.20:
+            sz = max(84, min(224, int(round(2.4 * max(bw, bh)))))
+            d2 = self._run_pose_on_roi_single(frame, cx_h - sz / 2.0, cy_h - sz / 2.0, sz, min_conf=conf_thres)
+            if d2 is not None and is_valid_hand_detection(d2) and d2["conf"] >= det["conf"]:
+                if "roi_tag" in det:
+                    d2["roi_tag"] = det["roi_tag"]
+                return d2, True
+            return det, True
+        return det, False
+
+    def _run_pose_on_roi(self, frame, origin_x, origin_y, crop_size, conf_thres, allow_micro_zoom=True):
+        probe_conf = min(conf_thres, 0.30) if allow_micro_zoom else conf_thres
+        det = self._run_pose_on_roi_single(frame, origin_x, origin_y, crop_size, min_conf=probe_conf)
+        if det is None:
+            return None
+
+        _, _, bw, bh = det["box"]
+        csize = det["roi"][2]
+        hand_frac = max(bw, bh) / max(float(csize), 1.0)
+        needs_micro_zoom = allow_micro_zoom and csize > 80 and (hand_frac < 0.25 or det["conf"] < conf_thres)
+        if needs_micro_zoom:
+            bx, by, bw, bh = det["box"]
+            micro_size = max(72, int(round(min(csize * 0.70, max(bw, bh) * 3.0))))
+            if micro_size < csize * 0.92:
+                micro_det = self._run_pose_on_roi_single(
+                    frame,
+                    bx + bw / 2.0 - micro_size / 2.0,
+                    by + bh / 2.0 - micro_size / 2.0,
+                    micro_size,
+                    min_conf=conf_thres,
+                )
+                if micro_det is not None and is_valid_hand_detection(micro_det):
+                    if det["conf"] < conf_thres or micro_det["conf"] >= det["conf"] - 0.05:
+                        return micro_det
+
+        if det["conf"] < conf_thres or not is_valid_hand_detection(det):
+            return None
         return det
 
     def _run_stage1_pose_rois(self, frame, conf_thres, max_rois=6):
@@ -520,7 +686,14 @@ class OptimalFlycamController:
         if body_model is None:
             return None, 0
 
-        body_imgsz = 640 if self.body_is_onnx else (960 if w_img >= 2560 else 640)
+        if self.body_is_onnx:
+            body_imgsz = 640
+        elif w_img >= 2560:
+            body_imgsz = 1280
+        elif w_img >= 1280:
+            body_imgsz = 960
+        else:
+            body_imgsz = 640
         body_res = body_model.predict(frame, conf=self.body_conf_thres, imgsz=body_imgsz, verbose=False)[0]
         if body_res is None or body_res.boxes is None or len(body_res.boxes) == 0:
             return None, 0
@@ -543,10 +716,25 @@ class OptimalFlycamController:
         checked = 0
         for rx, ry, rsize, _prio, tag in rois[:max_rois]:
             checked += 1
-            det = self._run_pose_on_roi(frame, rx, ry, rsize, conf_thres=conf_thres)
+            det = self._run_pose_on_roi(frame, rx, ry, rsize, conf_thres=conf_thres, allow_micro_zoom=True)
+            if det is None and rsize > 96:
+                micro_rsize = max(80, int(round(rsize * 0.70)))
+                checked += 1
+                det = self._run_pose_on_roi(
+                    frame,
+                    rx + rsize / 2.0 - micro_rsize / 2.0,
+                    ry + rsize / 2.0 - micro_rsize / 2.0,
+                    micro_rsize,
+                    conf_thres=conf_thres,
+                    allow_micro_zoom=False,
+                )
             if det is not None and (best_det is None or det["conf"] > best_det["conf"]):
                 det["roi_tag"] = tag
                 best_det = det
+        if best_det is not None:
+            best_det, did_recrop = self._recenter_roi_if_boundary(frame, best_det, conf_thres)
+            if did_recrop:
+                checked += 1
         return best_det, checked
 
     def _run_stage1_tile_rois(self, frame, conf_thres):
@@ -558,35 +746,37 @@ class OptimalFlycamController:
 
         for rx, ry, rsize, _prio, _tag in rois:
             checked += 1
-            coarse = self._run_pose_on_roi(frame, rx, ry, rsize, conf_thres=coarse_conf)
+            coarse = self._run_pose_on_roi_single(frame, rx, ry, rsize, min_conf=coarse_conf)
             if coarse is None:
                 continue
 
             bx, by, bw, bh = coarse["box"]
-            refine_size = max(128, min(384, int(round(3.0 * max(bw, bh)))))
+            refine_size = max(84, min(256, int(round(2.8 * max(bw, bh)))))
             if refine_size < rsize * 0.85:
                 checked += 1
-                refined = self._run_pose_on_roi(
+                refined = self._run_pose_on_roi_single(
                     frame,
                     bx + bw / 2.0 - refine_size / 2.0,
                     by + bh / 2.0 - refine_size / 2.0,
                     refine_size,
-                    conf_thres=conf_thres,
+                    min_conf=conf_thres,
                 )
-                cand = refined if refined is not None else (coarse if coarse["conf"] >= conf_thres else None)
+                cand = refined if (refined is not None and is_valid_hand_detection(refined)) else (
+                    coarse if (coarse["conf"] >= conf_thres and is_valid_hand_detection(coarse)) else None
+                )
             else:
-                cand = coarse if coarse["conf"] >= conf_thres else None
+                cand = coarse if (coarse["conf"] >= conf_thres and is_valid_hand_detection(coarse)) else None
 
             if cand is not None and (best_det is None or cand["conf"] > best_det["conf"]):
                 best_det = cand
-                if best_det["conf"] >= max(conf_thres, 0.72):
+                if best_det["conf"] >= max(conf_thres, 0.88):
                     break
 
         return best_det, checked
 
     def _update_temporal_roi(self, box_tlwh, w_img, h_img):
         bx, by, bw, bh = box_tlwh
-        crop_size = max(128, min(max(w_img, h_img), int(round(2.8 * max(bw, bh)))))
+        crop_size = max(96, min(max(w_img, h_img), int(round(2.8 * max(bw, bh)))))
         rx = int(round(bx + bw / 2.0 - crop_size / 2.0))
         ry = int(round(by + bh / 2.0 - crop_size / 2.0))
         self.last_roi = (rx, ry, crop_size)
@@ -610,15 +800,16 @@ class OptimalFlycamController:
 
         # 1) Full-frame pass (chỉ bỏ qua khi ép buộc chế độ 10m far_field='always')
         ff_candidate_roi = None
+        pose_imgsz = getattr(self, "pose_imgsz", 640)
         if mode != "always":
             probe_conf = conf_thres if mode == "off" else min(conf_thres, 0.20)
-            res = self.pose_model.predict(frame, conf=probe_conf, imgsz=640, verbose=False)[0]
+            res = self.pose_model.predict(frame, conf=probe_conf, imgsz=pose_imgsz, verbose=False)[0]
             ff_any = self._extract_top_hand_from_result(res, 0, 0, w_img, h_img, min_conf=probe_conf)
 
             if ff_any is not None:
                 bx, by, bw, bh = ff_any["box"]
                 is_large_enough = (not is_high_res) or (max(bw, bh) >= 0.11 * max(w_img, h_img))
-                if ff_any["conf"] >= conf_thres and (mode == "off" or is_large_enough):
+                if ff_any["conf"] >= conf_thres and (mode == "off" or (is_large_enough and is_valid_hand_detection(ff_any))):
                     ff_any["stage"] = "full_frame"
                     ff_any["roi"] = None
                     ff_any["rois_checked"] = rois_checked
@@ -627,7 +818,7 @@ class OptimalFlycamController:
                     return ff_any
 
                 if mode != "off":
-                    csize = max(128, min(max(w_img, h_img), int(round(3.0 * max(bw, bh)))))
+                    csize = max(96, min(max(w_img, h_img), int(round(2.8 * max(bw, bh)))))
                     ff_candidate_roi = (bx + bw / 2.0 - csize / 2.0, by + bh / 2.0 - csize / 2.0, csize)
 
             if mode == "off":
@@ -668,7 +859,7 @@ class OptimalFlycamController:
 
         # 4) Fallback cuối khi mode='always' nhưng bàn tay quá gần che khuất toàn thân
         if mode == "always":
-            res = self.pose_model.predict(frame, conf=conf_thres, imgsz=640, verbose=False)[0]
+            res = self.pose_model.predict(frame, conf=conf_thres, imgsz=pose_imgsz, verbose=False)[0]
             ff_det = self._extract_top_hand_from_result(res, 0, 0, w_img, h_img, min_conf=conf_thres)
             if ff_det is not None:
                 ff_det["stage"] = "full_frame"
@@ -681,6 +872,55 @@ class OptimalFlycamController:
         self._last_was_roi = False
         self.last_roi = None
         return None
+
+    def _refine_with_heatmap(self, clean_frame, box_tlwh):
+        if self.heatmap_session is None or self.heatmap_meta is None:
+            return None
+        h_img, w_img = clean_frame.shape[:2]
+        bx, by, bw, bh = (float(v) for v in box_tlwh)
+        crop_size = max(32, int(round(1.45 * max(bw, bh))))
+        cx = bx + bw / 2.0
+        cy = by + bh / 2.0
+        crop, (ox, oy, csize) = extract_square_roi(clean_frame, cx - crop_size / 2.0, cy - crop_size / 2.0, crop_size)
+
+        in_w = self.heatmap_meta["in_w"]
+        in_h = self.heatmap_meta["in_h"]
+        interp = cv2.INTER_CUBIC if csize < in_w else cv2.INTER_AREA
+        resized = cv2.resize(crop, (in_w, in_h), interpolation=interp)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        tensor = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1))[None, ...], dtype=np.float32)
+
+        t0 = time.perf_counter()
+        outs = self.heatmap_session.run(None, {self.heatmap_meta["input_name"]: tensor})
+        heatmap_ms = (time.perf_counter() - t0) * 1000.0
+
+        coords_idx = self.heatmap_meta["coords_idx"]
+        coords_arr = np.asarray(outs[coords_idx], dtype=np.float32).reshape(-1, 21, 2)[0]
+        kps_full = np.zeros((21, 2), dtype=np.float32)
+        kps_full[:, 0] = np.clip(coords_arr[:, 0] * float(csize) + float(ox), 0.0, float(w_img))
+        kps_full[:, 1] = np.clip(coords_arr[:, 1] * float(csize) + float(oy), 0.0, float(h_img))
+
+        pred_gesture = None
+        top_prob = 0.0
+        logits_idx = self.heatmap_meta.get("logits_idx")
+        if logits_idx is not None and logits_idx < len(outs):
+            logits = np.asarray(outs[logits_idx], dtype=np.float32).reshape(-1)
+            if logits.shape[0] == len(HEATMAP_GESTURE_CLASSES):
+                shifted = logits - float(np.max(logits))
+                exp_v = np.exp(shifted)
+                probs = exp_v / max(float(np.sum(exp_v)), 1e-9)
+                top_idx = int(np.argmax(probs))
+                top_prob = float(probs[top_idx])
+                if top_prob >= 0.45:
+                    pred_gesture = HEATMAP_GESTURE_CLASSES[top_idx]
+
+        return {
+            "keypoints": kps_full,
+            "gesture": pred_gesture,
+            "gesture_prob": top_prob,
+            "latency_ms": heatmap_ms,
+            "crop_roi": (ox, oy, csize),
+        }
 
     def process_frame(self, frame, conf_thres=0.5, far_field=None):
         t0 = time.perf_counter()
@@ -710,6 +950,9 @@ class OptimalFlycamController:
                     "stage": "none",
                     "roi": None,
                     "rois_checked": 0,
+                    "used_heatmap": False,
+                    "heatmap_latency_ms": 0.0,
+                    "heatmap_gesture_prob": 0.0,
                     "latency_ms": latency_ms,
                 }
                 cv2.putText(
@@ -728,6 +971,19 @@ class OptimalFlycamController:
             kps = det["keypoints"]
             roi = det.get("roi")
             stage = det.get("stage", "full_frame")
+
+            used_heatmap = False
+            heatmap_latency_ms = 0.0
+            heatmap_prob = 0.0
+            hm_gesture = None
+            if self.heatmap_session is not None:
+                hm_res = self._refine_with_heatmap(frame, raw_box)
+                if hm_res is not None:
+                    kps = hm_res["keypoints"]
+                    used_heatmap = True
+                    heatmap_latency_ms = hm_res["latency_ms"]
+                    heatmap_prob = hm_res["gesture_prob"]
+                    hm_gesture = hm_res["gesture"]
 
             # Vẽ khung ROI thích ứng nếu chạy Stage 2 Zoom
             if roi is not None:
@@ -749,6 +1005,8 @@ class OptimalFlycamController:
                     cv2.circle(frame, (int(kx), int(ky)), 3, (0, 255, 255), -1)
 
             raw_gesture, angle, bone_len = analyze_hand_keypoints(kps)
+            if used_heatmap and hm_gesture is not None:
+                raw_gesture = hm_gesture
             self.gesture_window.append(raw_gesture)
             gesture = Counter(self.gesture_window).most_common(1)[0][0]  # Debounce chống nhiễu
 
@@ -790,10 +1048,15 @@ class OptimalFlycamController:
                 "stage": stage,
                 "roi": roi,
                 "rois_checked": det.get("rois_checked", 0),
+                "used_heatmap": used_heatmap,
+                "heatmap_latency_ms": heatmap_latency_ms,
+                "heatmap_gesture_prob": heatmap_prob,
                 "latency_ms": latency_ms,
             }
 
             stage_tag = "[ROI Zoom]" if stage != "full_frame" else "[Full]"
+            if used_heatmap:
+                stage_tag += "[HM]"
             info = f"CMD: {cmd} | 3D(R,T,P)=({vx:+.2f},{vy:+.2f},{vz:+.2f}) {stage_tag}"
             x_i, y_i, w_i, h_i = (int(round(v)) for v in (sx, sy, sw, sh))
             cv2.rectangle(frame, (x_i, y_i), (x_i + w_i, y_i + h_i), (0, 0, 255), 2)
@@ -905,6 +1168,7 @@ def main():
     ap.add_argument("--model", default=os.path.join(base_dir, "hand_localization_model.h5"))
     ap.add_argument("--pose-model", default=None, help="đường dẫn tới hand_pose.pt hoặc hand_pose.onnx")
     ap.add_argument("--body-model", default=None, help="đường dẫn tới yolo11n-pose.pt (Stage 1 ROI Locator)")
+    ap.add_argument("--heatmap-model", default=None, help="đường dẫn tới hand_kpts_heatmap.onnx (Stage-2B Refiner)")
     ap.add_argument(
         "--far-field",
         choices=("auto", "always", "off"),
@@ -923,6 +1187,7 @@ def main():
         args.model,
         pose_model_path=args.pose_model,
         body_pose_model_path=args.body_model,
+        heatmap_model_path=args.heatmap_model,
         far_field_mode=args.far_field,
     )
     if args.image:

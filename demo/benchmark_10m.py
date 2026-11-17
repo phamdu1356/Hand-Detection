@@ -35,6 +35,8 @@ if DEMO_DIR not in sys.path:
 from test_model import (  # noqa: E402
     HAND_CONNECTIONS,
     OptimalFlycamController,
+    _load_heatmap_session,
+    _resolve_model_imgsz,
     analyze_hand_keypoints,
 )
 
@@ -128,40 +130,91 @@ def summarize_latencies(latencies_ms):
 # Dataset Discovery & Real Hand-Keypoints Loader
 # ---------------------------------------------------------------------------
 
-def find_dataset_yaml(explicit_path=None):
-    candidates = []
-    if explicit_path:
-        candidates.append(explicit_path)
-    candidates.extend([
-        os.path.join(REPO_ROOT, "datasets", "hand-keypoints", "hand-keypoints.yaml"),
-        os.path.join(REPO_ROOT, "hand-keypoints.yaml"),
-    ])
+def _get_ultralytics_datasets_dir():
     try:
         from ultralytics.utils import SETTINGS
         ds_dir = str(SETTINGS.get("datasets_dir", ""))
         if ds_dir:
-            candidates.append(os.path.join(ds_dir, "hand-keypoints", "hand-keypoints.yaml"))
-            candidates.append(os.path.join(ds_dir, "hand-keypoints.yaml"))
+            return os.path.abspath(ds_dir)
     except Exception:
         pass
+    sibling_ds = os.path.abspath(os.path.join(REPO_ROOT, "..", "datasets"))
+    if os.path.exists(sibling_ds):
+        return sibling_ds
+    return ""
+
+
+def find_dataset_yaml(explicit_path=None):
+    candidates = []
+    if explicit_path:
+        if os.path.isdir(explicit_path):
+            candidates.extend([
+                os.path.join(explicit_path, "data.yaml"),
+                os.path.join(explicit_path, "hand-keypoints.yaml"),
+            ])
+        else:
+            candidates.append(explicit_path)
+
+    search_roots = [
+        os.path.join(REPO_ROOT, "datasets"),
+        REPO_ROOT,
+    ]
+    ds_dir = _get_ultralytics_datasets_dir()
+    if ds_dir and ds_dir not in search_roots:
+        search_roots.insert(0, ds_dir)
+
+    for root in search_roots:
+        candidates.extend([
+            os.path.join(root, "hand-keypoints", "data.yaml"),
+            os.path.join(root, "hand-keypoints", "hand-keypoints.yaml"),
+            os.path.join(root, "data.yaml"),
+            os.path.join(root, "hand-keypoints.yaml"),
+        ])
 
     for c in candidates:
-        if c and os.path.exists(c):
+        if c and os.path.isfile(c):
             return os.path.abspath(c)
     return None
+
+
+def _resolve_dataset_base_path(cfg, yaml_path, split_rel):
+    yaml_dir = os.path.dirname(os.path.abspath(yaml_path))
+    raw_path = str(cfg.get("path") or "").strip()
+    if not raw_path or raw_path == ".":
+        return yaml_dir
+    if os.path.isabs(raw_path):
+        return raw_path
+
+    norm_raw = os.path.normpath(raw_path)
+    ds_dir = _get_ultralytics_datasets_dir()
+    candidates = []
+    if os.path.basename(yaml_dir) == norm_raw:
+        candidates.append(yaml_dir)
+    candidates.append(os.path.abspath(os.path.join(yaml_dir, raw_path)))
+    if ds_dir:
+        candidates.append(os.path.abspath(os.path.join(ds_dir, raw_path)))
+    candidates.append(os.path.abspath(os.path.join(os.path.dirname(yaml_dir), raw_path)))
+    candidates.append(yaml_dir)
+
+    for cand in candidates:
+        probe = split_rel if os.path.isabs(split_rel) else os.path.join(cand, split_rel)
+        if os.path.exists(probe):
+            return cand
+    return candidates[0]
 
 
 def load_yolo_pose_split(yaml_path, split="val", max_samples=48):
     with open(yaml_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    base_path = cfg.get("path", os.path.dirname(yaml_path))
-    if not os.path.isabs(base_path):
-        base_path = os.path.abspath(os.path.join(os.path.dirname(yaml_path), base_path))
-
-    split_rel = cfg.get(split) or cfg.get("val") or cfg.get("test")
-    if not split_rel:
+    split_entry = cfg.get(split) or cfg.get("val") or cfg.get("test")
+    if isinstance(split_entry, (list, tuple)):
+        split_entry = split_entry[0] if split_entry else None
+    if not split_entry:
         return []
+    split_rel = str(split_entry)
+
+    base_path = _resolve_dataset_base_path(cfg, yaml_path, split_rel)
     img_dir = split_rel if os.path.isabs(split_rel) else os.path.join(base_path, split_rel)
     if not os.path.exists(img_dir):
         return []
@@ -173,10 +226,16 @@ def load_yolo_pose_split(yaml_path, split="val", max_samples=48):
 
     kpt_dim = int(cfg.get("kpt_shape", [21, 3])[1]) if isinstance(cfg.get("kpt_shape"), (list, tuple)) else 3
     samples = []
+    img_sep = f"{os.sep}images{os.sep}"
+    lbl_sep = f"{os.sep}labels{os.sep}"
     for img_path in img_paths:
         if len(samples) >= max_samples:
             break
-        label_path = img_path.replace(f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}")
+        if img_sep in img_path:
+            head, tail = img_path.rsplit(img_sep, 1)
+            label_path = f"{head}{lbl_sep}{tail}"
+        else:
+            label_path = img_path
         label_path = os.path.splitext(label_path)[0] + ".txt"
         if not os.path.exists(label_path):
             continue
@@ -484,6 +543,125 @@ def embed_real_hand_at_10m(src_img, src_box_tlwh, src_kps, target_w, target_h, t
     return canvas, gt_box, gt_kps
 
 
+_PERSON_TEMPLATE_CACHE = {}
+
+
+def get_real_10m_person_template(body_model_path, target_person_h=185):
+    """Tạo mẫu người thật từ Ultralytics assets (zidane/bus) ở đúng tỷ lệ 10m để kiểm thử Stage 1A + Stage 2."""
+    key = (str(body_model_path), int(target_person_h))
+    if key in _PERSON_TEMPLATE_CACHE:
+        return _PERSON_TEMPLATE_CACHE[key]
+
+    try:
+        import ultralytics
+        from ultralytics import YOLO
+
+        assets_dir = os.path.join(os.path.dirname(ultralytics.__file__), "assets")
+        z_path = os.path.join(assets_dir, "zidane.jpg")
+        if not os.path.exists(z_path):
+            _PERSON_TEMPLATE_CACHE[key] = None
+            return None
+        z = cv2.imread(z_path)
+        if z is None:
+            _PERSON_TEMPLATE_CACHE[key] = None
+            return None
+
+        model = YOLO(body_model_path, task="pose")
+        r = model.predict(z, conf=0.4, imgsz=640, verbose=False)[0]
+        if r.boxes is None or len(r.boxes) == 0 or r.keypoints is None:
+            _PERSON_TEMPLATE_CACHE[key] = None
+            return None
+
+        k = r.keypoints.xy[0].cpu().numpy()
+        x1, y1, x2, y2 = 100, 140, min(z.shape[1], 1050), min(z.shape[0], 720)
+        pcrop = z[y1:y2, x1:x2].copy()
+        # Làm mềm cổ tay phải phụ gần mép dưới để chỉ cổ tay trái kp[9] mang bàn tay kiểm thử
+        wx10, wy10 = int(k[10][0] - x1), int(k[10][1] - y1)
+        if 0 <= wx10 < pcrop.shape[1] and 0 <= wy10 < pcrop.shape[0]:
+            patch_col = pcrop[max(0, wy10 - 30), min(pcrop.shape[1] - 1, max(0, wx10))].tolist()
+            cv2.circle(pcrop, (wx10, wy10), 22, tuple(int(c) for c in patch_col), -1)
+
+        scale_p = float(target_person_h) / max(float(y2 - y1), 1.0)
+        pw_s = max(24, int(round(pcrop.shape[1] * scale_p)))
+        ph_s = max(24, int(round(pcrop.shape[0] * scale_p)))
+        psmall = cv2.resize(pcrop, (pw_s, ph_s), interpolation=cv2.INTER_AREA)
+
+        mask = np.ones((ph_s, pw_s), dtype=np.float32)
+        bd = max(4, min(pw_s, ph_s) // 10)
+        mask[:bd, :] *= np.linspace(0.0, 1.0, bd, dtype=np.float32)[:, None]
+        mask[-bd:, :] *= np.linspace(1.0, 0.0, bd, dtype=np.float32)[:, None]
+        mask[:, :bd] *= np.linspace(0.0, 1.0, bd, dtype=np.float32)[None, :]
+        mask[:, -bd:] *= np.linspace(1.0, 0.0, bd, dtype=np.float32)[None, :]
+
+        w9_p = (k[9] - np.array([x1, y1], dtype=np.float32)) * scale_p
+        e7_p = (k[7] - np.array([x1, y1], dtype=np.float32)) * scale_p
+        hand_off = w9_p + 0.15 * (w9_p - e7_p)
+        k_scaled = (k - np.array([x1, y1], dtype=np.float32)) * scale_p
+        k_scaled[10] = [0.0, 0.0]  # Cổ tay phải đã được làm mờ để chỉ kiểm thử cổ tay trái kp[9]
+
+        tmpl = {
+            "image": psmall,
+            "mask3": mask[..., None],
+            "w": pw_s,
+            "h": ph_s,
+            "hand_offset": (float(hand_off[0]), float(hand_off[1])),
+            "kpts_rel": k_scaled,
+        }
+        _PERSON_TEMPLATE_CACHE[key] = tmpl
+        return tmpl
+    except Exception:
+        _PERSON_TEMPLATE_CACHE[key] = None
+        return None
+
+
+def embed_real_person_with_hand_at_10m(
+    src_img,
+    src_box_tlwh,
+    src_kps,
+    target_w,
+    target_h,
+    target_hand_px,
+    rng,
+    person_template=None,
+    center_xy=None,
+    bg=None,
+):
+    """Nhúng người thật tỷ lệ 10m + bàn tay thật từ hand-keypoints tại cổ tay trên nền phức tạp."""
+    if person_template is None:
+        return embed_real_hand_at_10m(
+            src_img, src_box_tlwh, src_kps, target_w, target_h, target_hand_px, rng, center_xy=center_xy, bg=bg
+        ) + ({"person_box": None, "person_kpts": None},)
+
+    canvas = make_complex_background(target_w, target_h, rng) if bg is None else bg.copy()
+    pw_s, ph_s = person_template["w"], person_template["h"]
+    hx_off, hy_off = person_template["hand_offset"]
+
+    if center_xy is not None:
+        px = int(np.clip(round(float(center_xy[0]) - hx_off), 0, max(0, target_w - pw_s)))
+        py = int(np.clip(round(float(center_xy[1]) - hy_off), 0, max(0, target_h - ph_s)))
+    else:
+        min_x = int(target_w * 0.08)
+        max_x = max(min_x + 1, target_w - pw_s - int(target_w * 0.08))
+        min_y = int(target_h * 0.08)
+        max_y = max(min_y + 1, target_h - ph_s - int(target_h * 0.08))
+        px = int(rng.integers(min_x, max_x))
+        py = int(rng.integers(min_y, max_y))
+
+    roi_bg = canvas[py:py + ph_s, px:px + pw_s].astype(np.float32)
+    mask3 = person_template["mask3"]
+    blended = person_template["image"].astype(np.float32) * mask3 + roi_bg * (1.0 - mask3)
+    canvas[py:py + ph_s, px:px + pw_s] = np.clip(blended, 0, 255).astype(np.uint8)
+
+    hcx = px + hx_off
+    hcy = py + hy_off
+    frame, gt_box, gt_kps = embed_real_hand_at_10m(
+        src_img, src_box_tlwh, src_kps, target_w, target_h, target_hand_px, rng, center_xy=(hcx, hcy), bg=canvas
+    )
+    person_box = (float(px), float(py), float(px + pw_s), float(py + ph_s))
+    person_kpts = person_template["kpts_rel"] + np.array([px, py], dtype=np.float32)
+    return frame, gt_box, gt_kps, {"person_box": person_box, "person_kpts": person_kpts}
+
+
 # ---------------------------------------------------------------------------
 # Calibrated Pre-Colab Proxies (chỉ dùng khi chưa tải hand_pose.pt từ Colab)
 # ---------------------------------------------------------------------------
@@ -574,6 +752,8 @@ class CalibratedHandPoseProxy:
     def __init__(self, seed=42):
         self.rng = np.random.default_rng(seed)
         self._full_frame = None
+        self._small_frame = None
+        self._small_scale = 1.0
         self._gt_box = None
         self._gt_kps = None
 
@@ -581,6 +761,15 @@ class CalibratedHandPoseProxy:
         self._full_frame = full_frame
         self._gt_box = gt_box_tlwh
         self._gt_kps = gt_kps
+        fh, fw = full_frame.shape[:2]
+        if max(fw, fh) >= 1200:
+            self._small_scale = 0.25
+            self._small_frame = cv2.resize(
+                full_frame, (int(fw * 0.25), int(fh * 0.25)), interpolation=cv2.INTER_AREA
+            )
+        else:
+            self._small_scale = 1.0
+            self._small_frame = None
 
     def _locate_crop_origin(self, crop):
         fh, fw = self._full_frame.shape[:2]
@@ -594,11 +783,10 @@ class CalibratedHandPoseProxy:
         if p_w >= fw or p_h >= fh:
             return 0, 0
         patch = crop[margin:margin + p_h, margin:margin + p_w]
-        scale = 0.25 if max(fw, fh) >= 1200 else 1.0
-        if scale < 1.0:
-            small_f = cv2.resize(self._full_frame, (int(fw * scale), int(fh * scale)), interpolation=cv2.INTER_AREA)
+        scale = self._small_scale
+        if scale < 1.0 and self._small_frame is not None:
             small_p = cv2.resize(patch, (max(8, int(p_w * scale)), max(8, int(p_h * scale))), interpolation=cv2.INTER_AREA)
-            res = cv2.matchTemplate(small_f, small_p, cv2.TM_SQDIFF_NORMED)
+            res = cv2.matchTemplate(self._small_frame, small_p, cv2.TM_SQDIFF_NORMED)
             _, _, min_loc, _ = cv2.minMaxLoc(res)
             cx0 = max(0, int(round(min_loc[0] / scale)) - 6)
             cy0 = max(0, int(round(min_loc[1] / scale)) - 6)
@@ -687,6 +875,7 @@ def evaluate_static_split(controller, samples, far_field_mode, conf_thres=0.5, u
     gest_correct, gest_total = 0, 0
     per_class = {g: [0, 0] for g in STATIC_GESTURES}
     latencies = []
+    hm_latencies = []
     stage_counts = {}
 
     for sample in samples:
@@ -712,6 +901,8 @@ def evaluate_static_split(controller, samples, far_field_mode, conf_thres=0.5, u
         res = controller.last_result or {}
         stage = res.get("stage", "none")
         stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        if res.get("used_heatmap"):
+            hm_latencies.append(float(res.get("heatmap_latency_ms", 0.0)))
         pred_kps = res.get("keypoints")
         pred_conf = float(res.get("conf", 0.0))
         pred_gesture = res.get("raw_gesture", "NONE")
@@ -728,7 +919,13 @@ def evaluate_static_split(controller, samples, far_field_mode, conf_thres=0.5, u
         pck_box_correct += c_b
         pck_box_total += t_b
 
-        palm_scale = float(np.linalg.norm(gt_kps[9] - gt_kps[0])) if len(gt_kps) >= 10 else box_scale * 0.5
+        valid_palm = (
+            len(gt_kps) >= 10
+            and (gt_vis is None or (gt_vis[0] > 0 and gt_vis[9] > 0))
+            and (gt_kps[0, 0] > 0 or gt_kps[0, 1] > 0)
+            and (gt_kps[9, 0] > 0 or gt_kps[9, 1] > 0)
+        )
+        palm_scale = float(np.linalg.norm(gt_kps[9] - gt_kps[0])) if valid_palm else box_scale * 0.5
         c_p, t_p, _ = compute_sample_pck(pred_kps, gt_kps, gt_vis, max(palm_scale, 1.0), threshold=0.2)
         pck_palm_correct += c_p
         pck_palm_total += t_p
@@ -762,6 +959,7 @@ def evaluate_static_split(controller, samples, far_field_mode, conf_thres=0.5, u
         "gesture_acc_pct": round(gest_acc_pct, 2),
         "gesture_per_class_pct": per_class_pct,
         "latency": summarize_latencies(latencies),
+        "heatmap_latency": summarize_latencies(hm_latencies) if hm_latencies else None,
         "stages": stage_counts,
     }
 
@@ -791,6 +989,7 @@ def evaluate_swipe_benchmark(
     seed=123,
     use_proxy_scene=False,
     real_samples=None,
+    person_template=None,
 ):
     rng = np.random.default_rng(seed)
     correct = 0
@@ -826,18 +1025,32 @@ def evaluate_swipe_benchmark(
                 cx = base_x + (t - 0.5) * dx_total + float(rng.normal(0.0, 1.5))
                 cy = base_y + (t - 0.5) * dy_total + float(rng.normal(0.0, 1.5))
                 if real_swipe_sample is not None:
-                    frame, gt_box, gt_kps = embed_real_hand_at_10m(
-                        real_swipe_sample["image"],
-                        real_swipe_sample["box"],
-                        real_swipe_sample["keypoints"],
-                        width,
-                        height,
-                        hand_px,
-                        rng,
-                        center_xy=(cx, cy),
-                        bg=trial_bg,
-                    )
-                    pmeta = {"person_box": None, "person_kpts": None}
+                    if hand_px < 120 and person_template is not None:
+                        frame, gt_box, gt_kps, pmeta = embed_real_person_with_hand_at_10m(
+                            real_swipe_sample["image"],
+                            real_swipe_sample["box"],
+                            real_swipe_sample["keypoints"],
+                            width,
+                            height,
+                            hand_px,
+                            rng,
+                            person_template=person_template,
+                            center_xy=(cx, cy),
+                            bg=trial_bg,
+                        )
+                    else:
+                        frame, gt_box, gt_kps = embed_real_hand_at_10m(
+                            real_swipe_sample["image"],
+                            real_swipe_sample["box"],
+                            real_swipe_sample["keypoints"],
+                            width,
+                            height,
+                            hand_px,
+                            rng,
+                            center_xy=(cx, cy),
+                            bg=trial_bg,
+                        )
+                        pmeta = {"person_box": None, "person_kpts": None}
                 else:
                     frame, gt_box, gt_kps, pmeta = render_synthetic_scene(
                         width,
@@ -876,6 +1089,22 @@ def evaluate_swipe_benchmark(
     }
 
 
+def benchmark_heatmap_latency_onnx(heatmap_path, warmup=10, iters=50):
+    """Đo tốc độ suy luận Stage-2B Refiner hand_kpts_heatmap.onnx qua ONNX Runtime."""
+    if not heatmap_path or not os.path.exists(heatmap_path):
+        return None
+    sess, meta = _load_heatmap_session(heatmap_path)
+    sample = np.random.rand(1, 3, meta["in_h"], meta["in_w"]).astype(np.float32)
+    for _ in range(warmup):
+        sess.run(None, {meta["input_name"]: sample})
+    lats = []
+    for _ in range(iters):
+        t0 = time.perf_counter()
+        sess.run(None, {meta["input_name"]: sample})
+        lats.append((time.perf_counter() - t0) * 1000.0)
+    return summarize_latencies(lats)
+
+
 def benchmark_model_latency_pt_vs_onnx(pt_path, onnx_path, imgsz=640, warmup=5, iters=25):
     """Đo tốc độ suy luận thực tế giữa PyTorch (.pt) và ONNXRuntime (.onnx)."""
     from ultralytics import YOLO
@@ -888,13 +1117,14 @@ def benchmark_model_latency_pt_vs_onnx(pt_path, onnx_path, imgsz=640, warmup=5, 
         if not path or not os.path.exists(path):
             continue
         model = YOLO(path, task="pose")
+        m_imgsz = _resolve_model_imgsz(model, default=imgsz)
         for res_name, img in (("640x640_ROI", sample_640), ("1920x1080_Full", sample_1080)):
             for _ in range(warmup):
-                model.predict(img, imgsz=imgsz, verbose=False)
+                model.predict(img, imgsz=m_imgsz, verbose=False)
             lats = []
             for _ in range(iters):
                 t0 = time.perf_counter()
-                model.predict(img, imgsz=imgsz, verbose=False)
+                model.predict(img, imgsz=m_imgsz, verbose=False)
                 lats.append((time.perf_counter() - t0) * 1000.0)
             results[f"{label} | {res_name}"] = summarize_latencies(lats)
     return results
@@ -949,7 +1179,7 @@ def benchmark_real_stage1_yolo11n_pose(body_model_path, target_heights=(190, 380
             oy = (canvas_h - nh) // 2
             canvas[oy:oy + nh, ox:ox + nw] = small
 
-            imgsz = 960 if canvas_w >= 2560 else 640
+            imgsz = 1280 if canvas_w >= 2560 else 960
             t0 = time.perf_counter()
             res = model.predict(canvas, conf=0.25, imgsz=imgsz, verbose=False)[0]
             ms = (time.perf_counter() - t0) * 1000.0
@@ -976,17 +1206,31 @@ def benchmark_real_stage1_yolo11n_pose(body_model_path, target_heights=(190, 380
 # Sample Set Builders & Report Writers
 # ---------------------------------------------------------------------------
 
-def build_eval_samples(real_samples, width, height, hand_px, count_per_gesture=3, seed=42, include_person=True):
+def build_eval_samples(
+    real_samples,
+    width,
+    height,
+    hand_px,
+    count_per_gesture=3,
+    seed=42,
+    include_person=True,
+    person_template=None,
+):
     rng = np.random.default_rng(seed)
     samples = []
 
     if real_samples:
         for idx, rs in enumerate(real_samples):
+            pmeta = None
             if hand_px >= 120:
                 # Cự ly gần 2m: dùng trực tiếp ảnh hand-keypoints gốc (close-range)
                 frame = rs["image"]
                 gt_box = rs["box"]
                 gt_kps = rs["keypoints"]
+            elif include_person and person_template is not None:
+                frame, gt_box, gt_kps, pmeta = embed_real_person_with_hand_at_10m(
+                    rs["image"], rs["box"], rs["keypoints"], width, height, hand_px, rng, person_template=person_template
+                )
             else:
                 frame, gt_box, gt_kps = embed_real_hand_at_10m(
                     rs["image"], rs["box"], rs["keypoints"], width, height, hand_px, rng
@@ -998,7 +1242,7 @@ def build_eval_samples(real_samples, width, height, hand_px, count_per_gesture=3
                 "visibility": rs["visibility"],
                 "gesture": rs["gesture"],
                 "source": f"real:{os.path.basename(rs['image_path'])}#{idx}",
-                "person_meta": None,
+                "person_meta": pmeta,
             })
         return samples
 
@@ -1028,6 +1272,7 @@ def write_markdown_report(summary, report_path):
         f"- **Gate (>= {PASS_THRESHOLD_PCT:.1f}% 10m Accuracy)**: **{summary['gate_status']}**",
         f"- **PyTorch Model**: `{summary['models']['pt_path'] or 'N/A'}`",
         f"- **ONNX Model**: `{summary['models']['onnx_path'] or 'N/A'}`",
+        f"- **Stage-2B Heatmap Refiner**: `{summary['models'].get('heatmap_path') or 'N/A'}` (`active={summary['models'].get('heatmap_active', False)}`)",
         f"- **Dataset**: `{summary['dataset_source']}`",
         "",
     ]
@@ -1047,10 +1292,11 @@ def write_markdown_report(summary, report_path):
     ])
     for key, label in (
         ("close_2m_pt", "Close 2m (640x480)"),
-        ("far_10m_1080p_naive", "10m 1080p (Naive Full-Frame)"),
-        ("far_10m_1080p_2stage", "10m 1080p (2-Stage ROI Zoom)"),
-        ("far_10m_4k_2stage", "10m 4K (2-Stage ROI Zoom)"),
-        ("far_10m_1080p_onnx_2stage", "10m 1080p ONNX (2-Stage ROI Zoom)"),
+        ("far_10m_1080p_naive", "10m 1080p Person+Hand (Naive Full-Frame)"),
+        ("far_10m_1080p_2stage", "10m 1080p Person+Hand (2-Stage ROI Zoom)"),
+        ("far_10m_4k_2stage", "10m 4K Person+Hand (2-Stage ROI Zoom)"),
+        ("far_10m_1080p_onnx_2stage", "10m 1080p ONNX Person+Hand (2-Stage ROI Zoom)"),
+        ("far_10m_1080p_disembodied", "10m 1080p Disembodied (Stage 1B Tile Fallback)"),
     ):
         m = summary["scenarios"].get(key)
         if not m:
@@ -1122,6 +1368,7 @@ def parse_args():
     ap.add_argument("--pt-model", default=None, help="đường dẫn tới hand_pose.pt")
     ap.add_argument("--onnx-model", default=None, help="đường dẫn tới hand_pose.onnx")
     ap.add_argument("--body-model", default=None, help="đường dẫn tới yolo11n-pose.pt")
+    ap.add_argument("--heatmap-model", default=None, help="đường dẫn tới hand_kpts_heatmap.onnx")
     ap.add_argument("--data", default=None, help="đường dẫn tới hand-keypoints.yaml")
     ap.add_argument("--split", default="val", choices=("val", "test"), help="tập dữ liệu kiểm tra")
     ap.add_argument("--max-samples", type=int, default=32, help="số mẫu đánh giá tối đa nếu dùng hand-keypoints")
@@ -1161,6 +1408,11 @@ def main():
         os.path.join(REPO_ROOT, "yolo11n-pose.pt"),
         os.path.join(DEMO_DIR, "yolo11n-pose.pt"),
     ]) or "yolo11n-pose.pt"
+    heatmap_path = resolve_first_existing([
+        args.heatmap_model,
+        os.path.join(REPO_ROOT, "hand_kpts_heatmap.onnx"),
+        os.path.join(DEMO_DIR, "hand_kpts_heatmap.onnx"),
+    ])
 
     yaml_path = find_dataset_yaml(args.data)
     real_samples = load_yolo_pose_split(yaml_path, split=args.split, max_samples=args.max_samples) if yaml_path else []
@@ -1171,13 +1423,29 @@ def main():
     else:
         dataset_source = f"Calibrated 8-class anatomical hand+body suite ({args.count_per_gesture}x8={args.count_per_gesture * 8} samples/split)"
 
-    samples_2m = build_eval_samples(real_samples, 640, 480, hand_px=210, count_per_gesture=args.count_per_gesture, seed=101)
-    samples_10m_1080p = build_eval_samples(real_samples, 1920, 1080, hand_px=28, count_per_gesture=args.count_per_gesture, seed=202)
-    samples_10m_4k = build_eval_samples(real_samples, 3840, 2160, hand_px=56, count_per_gesture=args.count_per_gesture, seed=303)
-
     # Khởi tạo controller (model thật nếu có, hoặc proxy vật lý khi chạy --pipeline-verify / pre-Colab)
-    use_proxy = not has_real_hand_model
-    execution_mode = "REAL_TRAINED_MODEL" if has_real_hand_model else "PRE_COLAB_CALIBRATION"
+    use_proxy = bool(args.pipeline_verify) or (not has_real_hand_model)
+    execution_mode = (
+        "PIPELINE_VERIFY" if args.pipeline_verify else ("REAL_TRAINED_MODEL" if has_real_hand_model else "PRE_COLAB_CALIBRATION")
+    )
+
+    person_tmpl_1080p = get_real_10m_person_template(body_path, target_person_h=185) if real_samples else None
+    person_tmpl_4k = get_real_10m_person_template(body_path, target_person_h=370) if real_samples else None
+
+    samples_2m = build_eval_samples(real_samples, 640, 480, hand_px=210, count_per_gesture=args.count_per_gesture, seed=101)
+    samples_10m_1080p = build_eval_samples(
+        real_samples, 1920, 1080, hand_px=28, count_per_gesture=args.count_per_gesture, seed=202,
+        include_person=True, person_template=person_tmpl_1080p,
+    )
+    samples_10m_4k = build_eval_samples(
+        real_samples, 3840, 2160, hand_px=56, count_per_gesture=args.count_per_gesture, seed=303,
+        include_person=True, person_template=person_tmpl_4k,
+    )
+    samples_10m_disembodied = build_eval_samples(
+        real_samples[:min(len(real_samples), 15)] if real_samples else [],
+        1920, 1080, hand_px=28, count_per_gesture=max(1, min(args.count_per_gesture, 2)), seed=404,
+        include_person=False, person_template=None,
+    )
 
     def make_controller(pose_file=None, far_field_mode="auto"):
         ctrl = OptimalFlycamController(
@@ -1185,6 +1453,7 @@ def main():
             cnn_path="",
             pose_model_path=pose_file,
             body_pose_model_path=body_path if os.path.exists(body_path) else None,
+            heatmap_model_path="" if use_proxy else (heatmap_path or ""),
             far_field_mode=far_field_mode,
             use_temporal_roi=False,
         )
@@ -1209,26 +1478,32 @@ def main():
     res_naive["mode_label"] = "naive_full_frame"
     scenarios["far_10m_1080p_naive"] = res_naive
 
-    # 3. 10m 1080p 2-Stage Adaptive ROI Zoom
+    # 3. 10m 1080p 2-Stage Adaptive ROI Zoom (Person+Hand Stage 1A + Stage 2)
     ctrl_1080 = make_controller(primary_file, "auto")
     res_1080 = evaluate_static_split(ctrl_1080, samples_10m_1080p, "auto", conf_thres=args.conf, use_proxy_scene=use_proxy)
     res_1080["mode_label"] = "2stage_roi_zoom"
     scenarios["far_10m_1080p_2stage"] = res_1080
 
-    # 4. 10m 4K 2-Stage Adaptive ROI Zoom
+    # 4. 10m 4K 2-Stage Adaptive ROI Zoom (Person+Hand Stage 1A + Stage 2)
     ctrl_4k = make_controller(primary_file, "auto")
     res_4k = evaluate_static_split(ctrl_4k, samples_10m_4k, "auto", conf_thres=args.conf, use_proxy_scene=use_proxy)
     res_4k["mode_label"] = "2stage_roi_zoom"
     scenarios["far_10m_4k_2stage"] = res_4k
 
     # 5. Nếu có cả hand_pose.onnx và hand_pose.pt, đánh giá riêng bản ONNX ở 10m 1080p
-    if pt_path and onnx_path:
+    if pt_path and onnx_path and not use_proxy:
         ctrl_onnx = make_controller(onnx_path, "auto")
         res_onnx = evaluate_static_split(ctrl_onnx, samples_10m_1080p, "auto", conf_thres=args.conf, use_proxy_scene=False)
         res_onnx["mode_label"] = "onnx_2stage_roi_zoom"
         scenarios["far_10m_1080p_onnx_2stage"] = res_onnx
 
-    # 6. Dynamic Swipe Benchmark (2m vs 10m Naive vs 10m 2-Stage)
+    # 6. Disembodied 10m 1080p diagnostic (Stage 1B tile fallback without body)
+    ctrl_tile = make_controller(primary_file, "auto")
+    res_tile = evaluate_static_split(ctrl_tile, samples_10m_disembodied, "auto", conf_thres=args.conf, use_proxy_scene=use_proxy)
+    res_tile["mode_label"] = "stage1b_tile_fallback"
+    scenarios["far_10m_1080p_disembodied"] = res_tile
+
+    # 7. Dynamic Swipe Benchmark (2m vs 10m Naive vs 10m 2-Stage)
     def make_swipe_ctrl(far_mode):
         c = make_controller(primary_file, far_mode)
         c.use_temporal_roi = True
@@ -1239,10 +1514,10 @@ def main():
             make_swipe_ctrl("auto"), 640, 480, 210, "auto", use_proxy_scene=use_proxy, real_samples=real_samples
         ),
         "swipe_10m_naive": evaluate_swipe_benchmark(
-            make_swipe_ctrl("off"), 1920, 1080, 28, "off", use_proxy_scene=use_proxy, real_samples=real_samples
+            make_swipe_ctrl("off"), 1920, 1080, 28, "off", use_proxy_scene=use_proxy, real_samples=real_samples, person_template=person_tmpl_1080p
         ),
         "swipe_10m_2stage": evaluate_swipe_benchmark(
-            make_swipe_ctrl("auto"), 1920, 1080, 28, "auto", use_proxy_scene=use_proxy, real_samples=real_samples
+            make_swipe_ctrl("auto"), 1920, 1080, 28, "auto", use_proxy_scene=use_proxy, real_samples=real_samples, person_template=person_tmpl_1080p
         ),
     }
 
@@ -1252,6 +1527,10 @@ def main():
     if pt_path or onnx_path:
         latency_subject = "hand_pose"
         latency_pt_vs_onnx = benchmark_model_latency_pt_vs_onnx(pt_path, onnx_path)
+        if heatmap_path:
+            hm_lat = benchmark_heatmap_latency_onnx(heatmap_path)
+            if hm_lat is not None:
+                latency_pt_vs_onnx["Stage-2B Heatmap (.onnx) | 192x192_Refiner"] = hm_lat
     else:
         # Đo thực tế Stage-1 backbone yolo11n-pose.pt vs .onnx tạm thời nếu đã có yolo11n-pose.pt
         try:
@@ -1283,13 +1562,13 @@ def main():
     ]
     min_10m_acc = min(metrics_10m)
 
-    if has_real_hand_model:
+    if not use_proxy:
         passed = min_10m_acc >= PASS_THRESHOLD_PCT
         gate_status = "PASS" if passed else f"FAIL (min 10m metric = {min_10m_acc:.2f}% < {PASS_THRESHOLD_PCT:.1f}%)"
     else:
         if args.pipeline_verify and min_10m_acc >= PASS_THRESHOLD_PCT:
             passed = True
-            gate_status = f"PIPELINE_VERIFIED_PRE_COLAB (min 10m = {min_10m_acc:.2f}%, awaiting trained hand_pose.pt)"
+            gate_status = f"PIPELINE_VERIFIED (min 10m = {min_10m_acc:.2f}%, proxy Stage-2)"
         else:
             passed = False
             gate_status = "PENDING_COLAB_MODEL (hand_pose.pt / hand_pose.onnx missing)"
@@ -1305,6 +1584,8 @@ def main():
             "pt_path": pt_path,
             "onnx_path": onnx_path,
             "body_pose_path": body_path,
+            "heatmap_path": heatmap_path,
+            "heatmap_active": bool((not use_proxy) and heatmap_path),
         },
         "dataset_source": dataset_source,
         "scenarios": scenarios,

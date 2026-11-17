@@ -10,9 +10,12 @@ demo/__pycache__/
 *.py[cod]
 *$py.class
 
-# Pretrained / intermediate model weights (keep trained hand_pose.pt and hand_pose.onnx trackable)
+# Pretrained / intermediate model weights (keep trained hand_pose.pt, hand_pose.onnx, hand_kpts_heatmap.onnx trackable)
 yolo11*.pt
 *.pt
 !hand_pose.pt
 *.onnx
 !hand_pose.onnx
+!hand_kpts_heatmap.onnx
+flycam_models.zip
+hand_keypoints_fixed.yaml
