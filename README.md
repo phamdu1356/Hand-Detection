@@ -153,3 +153,81 @@ h = pred_box[3] * orig_h
 
 print(f"Hộp giới hạn bàn tay phát hiện: X={x:.1f}, Y={y:.1f}, W={w:.1f}, H={h:.1f}")
 ```
+
+---
+
+## Điều khiển drone giả lập
+
+Phần này điều khiển một quadrotor trong PyBullet bằng cử chỉ tay qua webcam. Drone thật chưa được nối vào.
+
+Hệ trục: người dùng đứng ở gốc, nhìn về phía +X. Lệnh vận tốc tính theo hướng nhìn của người dùng: `forward` ra xa, `right` sang phải, `up` lên, `yaw_rate` xoay trái (dương).
+
+### Cài đặt (một lần, dùng `.venv` có sẵn)
+
+```bash
+cd "/home/pham-du/code/học và hành/Hand-Detection"
+.venv/bin/pip install pybullet pytest pyyaml onnxruntime
+```
+
+Chạy toàn bộ test:
+```bash
+.venv/bin/python -m pytest tests -q
+```
+
+Lái thử drone giả lập bằng bàn phím (W/S tiến lùi, A/D trái phải, ↑/↓ lên xuống, ←/→ xoay, T cất cánh, L hạ cánh, Space dừng):
+```bash
+.venv/bin/python sim/teleop_keyboard.py
+```
+
+Kiểm tra nhanh không cần cửa sổ (khoảng 3 giây mô phỏng):
+```bash
+.venv/bin/python sim/teleop_keyboard.py --smoke
+```
+
+### Chạy bằng tay và webcam
+
+Chỉ in lệnh, không mở sim:
+```bash
+.venv/bin/python demo/fly_sim.py --camera 0 --backend mock
+```
+
+Điều khiển drone giả lập bằng tay, có ghi log (một dòng CSV mỗi khung):
+```bash
+.venv/bin/python demo/fly_sim.py --camera 0 --backend sim --log logs/run1.csv
+```
+
+Phím trong cửa sổ: `q` thoát, `r` đặt lại bộ điều khiển, `Space` dừng khẩn (lệnh bằng 0 và chuyển sang HOVER khi đang bay), `h` ẩn/hiện HUD.
+
+Phát lại một phiên đã ghi, để so sánh khi chỉnh thông số:
+```bash
+.venv/bin/python demo/fly_sim.py --replay logs/run1.csv --backend sim --config my.yaml
+```
+
+Chạy kịch bản tổng hợp (không cần camera, không cần model):
+```bash
+.venv/bin/python demo/fly_sim.py --synthetic --backend mock --no-gui --log logs/synthetic.csv
+```
+
+Kiểm tra log theo các chỉ tiêu M1, M2, M8, M9:
+```bash
+.venv/bin/python tools/check_log.py logs/run1.csv
+```
+
+Chỉnh thông số: sao chép `dronectl/config.py` thành YAML (ví dụ `my.yaml`), giữ những khóa cần đổi, rồi truyền bằng `--config my.yaml`. Khóa lạ sẽ bị báo lỗi.
+
+### Bằng Docker (CPU, chậm hơn bản `.venv`)
+
+Đặt `hand_pose.pt` (hoặc `.onnx`) và `yolo11n-pose.pt` vào `demo/models/`. File model không có trong image.
+
+```bash
+xhost +local:docker
+cd demo && docker compose build fly
+cd demo && docker compose run --rm fly --backend sim --camera 0 --pose-model /app/models/hand_pose.pt --body-model /app/models/yolo11n-pose.pt
+```
+
+Thử không cần camera và không cần model:
+```bash
+cd demo && docker compose run --rm fly --backend mock --synthetic --no-gui
+```
+
+Trạng thái: chưa chạy với webcam thật. Chỉ tiêu độ trễ và FPS (M8) cần đo trên webcam của bạn.

@@ -19,3 +19,9 @@ yolo11*.pt
 !hand_kpts_heatmap.onnx
 flycam_models.zip
 hand_keypoints_fixed.yaml
+
+# Simulator and controller outputs
+logs/
+data/
+.coverage
+htmlcov/

@@ -1,0 +1,13 @@
+.git
+.venv
+runs
+logs
+data
+**/__pycache__
+*.pt
+*.onnx
+*.h5
+*.ipynb
+*.zip
+htmlcov
+.coverage

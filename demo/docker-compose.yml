@@ -12,3 +12,25 @@ services:
       - QT_X11_NO_MITSHM=1
     devices:
       - /dev/video0:/dev/video0
+
+  # Drone giả lập điều khiển bằng tay. Model đặt trong demo/models/ (không đóng vào image).
+  #   cd demo && docker compose run --rm fly --backend sim --camera 0
+  #   cd demo && docker compose run --rm fly --backend mock --synthetic --no-gui
+  fly:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    image: drone-gesture-fly:latest
+    volumes:
+      - ./models:/app/models:ro
+      - ../logs:/app/logs
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+    devices:
+      - /dev/video0:/dev/video0
+    command: ["--backend", "sim", "--camera", "0",
+              "--pose-model", "/app/models/hand_pose.pt",
+              "--body-model", "/app/models/yolo11n-pose.pt",
+              "--log", "/app/logs/run1.csv"]
