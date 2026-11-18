@@ -1,7 +1,7 @@
 """Numpy-only copies of the hand rules in demo/test_model.py.
 
-They are copied rather than imported so that dronectl does not pull in OpenCV or the demo
-package. demo/test_model.py is not changed in this phase.
+Defined here, with no OpenCV or demo dependency. demo/test_model.py imports them from this
+module, so there is one copy of the rules.
 """
 from __future__ import annotations
 

@@ -21,10 +21,16 @@ import argparse
 from collections import Counter, deque
 import math
 import os
+import sys
 import time
 
 import cv2
 import numpy as np
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from dronectl.hand_rules import _is_valid_kp, analyze_hand_keypoints  # noqa: E402
 
 IMG_SIZE = 224
 COCO_LEFT_SHOULDER = 5
@@ -68,77 +74,6 @@ def predict_box(model, frame_bgr):
     x = tf.image.resize(rgb, [IMG_SIZE, IMG_SIZE])[tf.newaxis, ...]
     bx, by, bw, bh = model(x, training=False).numpy()[0]
     return bx * w_img, by * h_img, bw * w_img, bh * h_img
-
-
-def _is_valid_kp(pt):
-    return (
-        pt is not None
-        and len(pt) >= 2
-        and math.isfinite(float(pt[0]))
-        and math.isfinite(float(pt[1]))
-        and (float(pt[0]) > 0.0 or float(pt[1]) > 0.0)
-    )
-
-
-def analyze_hand_keypoints(kps):
-    """Từ 21 khớp (x, y), trích xuất đồng thời: cử chỉ tĩnh, góc chỉ ngón trỏ và độ dài xương bàn tay."""
-    kps = np.asarray(kps, dtype=np.float32)
-    if kps.shape[0] < 21 or not _is_valid_kp(kps[0]) or not _is_valid_kp(kps[9]):
-        return "UNKNOWN", 0.0, 0.0
-
-    wrist = kps[0]
-    middle_mcp = kps[9]
-    palm_bone_len = float(np.linalg.norm(middle_mcp - wrist))
-    if palm_bone_len < 1e-3:
-        return "UNKNOWN", 0.0, 0.0
-
-    # Kiểm tra trạng thái mở của 4 ngón dài: trỏ (8,6), giữa (12,10), áp út (16,14), út (20,18)
-    fingers = []
-    for tip_idx, pip_idx in ((8, 6), (12, 10), (16, 14), (20, 18)):
-        if _is_valid_kp(kps[tip_idx]) and _is_valid_kp(kps[pip_idx]):
-            is_open = np.linalg.norm(kps[tip_idx] - wrist) > np.linalg.norm(kps[pip_idx] - wrist) * 1.15
-            fingers.append(bool(is_open))
-        else:
-            fingers.append(False)
-
-    if _is_valid_kp(kps[4]) and _is_valid_kp(kps[2]) and _is_valid_kp(kps[17]):
-        thumb_open = bool(np.linalg.norm(kps[4] - kps[17]) > np.linalg.norm(kps[2] - kps[17]) * 1.18)
-    else:
-        thumb_open = False
-
-    if _is_valid_kp(kps[4]) and _is_valid_kp(kps[8]):
-        thumb_index_dist = float(np.linalg.norm(kps[4] - kps[8])) / palm_bone_len
-    else:
-        thumb_index_dist = 999.0
-
-    # Góc chỉ của ngón trỏ (kp5 -> kp8) trong mặt phẳng camera (-180..180 độ)
-    if _is_valid_kp(kps[5]) and _is_valid_kp(kps[8]):
-        dx, dy = float(kps[8][0] - kps[5][0]), float(kps[5][1] - kps[8][1])
-        point_angle = math.degrees(math.atan2(dy, dx))
-    else:
-        point_angle = 0.0
-
-    count_4 = sum(fingers)
-    if thumb_index_dist < 0.42 and sum(fingers[1:]) >= 2:
-        gesture = "ok"
-    elif count_4 == 0 and not thumb_open:
-        gesture = "fist"
-    elif count_4 == 0 and thumb_open:
-        gesture = "like"
-    elif fingers[0] and count_4 == 1:
-        gesture = "one"
-    elif fingers[0] and fingers[1] and count_4 == 2:
-        gesture = "peace_inverted"
-    elif count_4 == 3:
-        gesture = "three"
-    elif count_4 == 4 and not thumb_open:
-        gesture = "four"
-    elif count_4 == 4 and thumb_open:
-        gesture = "palm"
-    else:
-        gesture = "palm" if count_4 >= 3 else "fist"
-
-    return gesture, point_angle, palm_bone_len
 
 
 def detect_swipe_from_wrist(wrist_history, min_disp=0.14):
@@ -438,6 +373,25 @@ def _load_heatmap_session(model_path):
     return session, meta
 
 
+def select_main_person(person_boxes, body_kpts, hand_center=None):
+    """Index of the main person: the one whose wrist is nearest the hand, else the largest box."""
+    boxes = np.asarray(person_boxes, dtype=float).reshape(-1, 4)
+    if len(boxes) == 0:
+        return None
+    if hand_center is not None:
+        best, best_d = None, None
+        for i, kp in enumerate(body_kpts):
+            for w in (kp[COCO_LEFT_WRIST], kp[COCO_RIGHT_WRIST]):
+                if _is_valid_kp(w):
+                    d = float(np.hypot(w[0] - hand_center[0], w[1] - hand_center[1]))
+                    if best_d is None or d < best_d:
+                        best, best_d = i, d
+        if best is not None:
+            return best
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    return int(np.argmax(areas))
+
+
 class OptimalFlycamController:
     """Bộ điều khiển Flycam tối ưu dùng 1 model YOLO11n-Pose + 2-Stage Adaptive ROI Zoom (fallback CNN nếu chưa có)."""
 
@@ -454,6 +408,7 @@ class OptimalFlycamController:
         enable_tile_fallback=True,
         use_temporal_roi=True,
         preload_body_pose=False,
+        always_body_pose=False,
     ):
         self.base_dir = base_dir
         self.cnn_path = cnn_path
@@ -475,6 +430,8 @@ class OptimalFlycamController:
         self.body_conf_thres = float(body_conf_thres)
         self.enable_tile_fallback = bool(enable_tile_fallback)
         self.use_temporal_roi = bool(use_temporal_roi)
+        self.always_body_pose = bool(always_body_pose)
+        self._body_cache = None  # (frame, result) of the last body-pose run
 
         self.wrist_history = deque(maxlen=10)
         self.gesture_window = deque(maxlen=5)
@@ -544,7 +501,9 @@ class OptimalFlycamController:
         self._body_pose_candidates.append("yolo11n-pose.pt")
 
         has_local_body = any(os.path.exists(p) for p in self._body_pose_candidates[:-1])
-        if preload_body_pose or (self.pose_model is not None and (far_field_mode == "always" or has_local_body)):
+        if preload_body_pose or self.always_body_pose or (
+            self.pose_model is not None and (far_field_mode == "always" or has_local_body)
+        ):
             self._ensure_body_pose_model()
 
     def reset_state(self):
@@ -680,34 +639,71 @@ class OptimalFlycamController:
             return None
         return det
 
+    def _run_body_pose(self, frame):
+        """Run the person pose model once per frame object and cache the result.
+
+        Returns (person_boxes xyxy, person_confs, body_kpts (N,17,2), body_kpt_confs or None),
+        or None when there is no model or no person. Cached by frame identity, so stage 1 and
+        the always-on body path share one model call per frame.
+        """
+        if self._body_cache is not None and self._body_cache[0] is frame:
+            return self._body_cache[1]
+        result = None
+        body_model = self._ensure_body_pose_model()
+        if body_model is not None:
+            h_img, w_img = frame.shape[:2]
+            if self.body_is_onnx:
+                body_imgsz = 640
+            elif w_img >= 2560:
+                body_imgsz = 1280
+            elif w_img >= 1280:
+                body_imgsz = 960
+            else:
+                body_imgsz = 640
+            body_res = body_model.predict(frame, conf=self.body_conf_thres, imgsz=body_imgsz, verbose=False)[0]
+            if not (
+                body_res is None or body_res.boxes is None or len(body_res.boxes) == 0
+                or body_res.keypoints is None or body_res.keypoints.xy is None or len(body_res.keypoints.xy) == 0
+            ):
+                result = (
+                    self._to_numpy(body_res.boxes.xyxy),
+                    self._to_numpy(body_res.boxes.conf).reshape(-1),
+                    self._to_numpy(body_res.keypoints.xy),
+                    (
+                        self._to_numpy(body_res.keypoints.conf)
+                        if getattr(body_res.keypoints, "conf", None) is not None
+                        else None
+                    ),
+                )
+        self._body_cache = (frame, result)
+        return result
+
+    def _body_fields(self, frame, hand_center=None):
+        """Main-person fields for last_result: body_keypoints (17,2), body_kpt_conf (17,), person_box (x,y,w,h).
+
+        Uses the body run cached for this frame. If none ran on this frame, all three are None.
+        """
+        empty = {"body_keypoints": None, "body_kpt_conf": None, "person_box": None}
+        if self._body_cache is None or self._body_cache[0] is not frame or self._body_cache[1] is None:
+            return empty
+        boxes, confs, kpts, kconf = self._body_cache[1]
+        idx = select_main_person(boxes, kpts, hand_center)
+        if idx is None:
+            return empty
+        x1, y1, x2, y2 = (float(v) for v in boxes[idx][:4])
+        kc = np.asarray(kconf[idx], dtype=float) if kconf is not None else np.ones(len(kpts[idx]))
+        return {
+            "body_keypoints": np.asarray(kpts[idx], dtype=float),
+            "body_kpt_conf": kc,
+            "person_box": (x1, y1, x2 - x1, y2 - y1),
+        }
+
     def _run_stage1_pose_rois(self, frame, conf_thres, max_rois=6):
         h_img, w_img = frame.shape[:2]
-        body_model = self._ensure_body_pose_model()
-        if body_model is None:
+        body = self._run_body_pose(frame)
+        if body is None:
             return None, 0
-
-        if self.body_is_onnx:
-            body_imgsz = 640
-        elif w_img >= 2560:
-            body_imgsz = 1280
-        elif w_img >= 1280:
-            body_imgsz = 960
-        else:
-            body_imgsz = 640
-        body_res = body_model.predict(frame, conf=self.body_conf_thres, imgsz=body_imgsz, verbose=False)[0]
-        if body_res is None or body_res.boxes is None or len(body_res.boxes) == 0:
-            return None, 0
-        if body_res.keypoints is None or body_res.keypoints.xy is None or len(body_res.keypoints.xy) == 0:
-            return None, 0
-
-        person_boxes = self._to_numpy(body_res.boxes.xyxy)
-        person_confs = self._to_numpy(body_res.boxes.conf).reshape(-1)
-        body_kpts = self._to_numpy(body_res.keypoints.xy)
-        body_kpt_confs = (
-            self._to_numpy(body_res.keypoints.conf)
-            if getattr(body_res.keypoints, "conf", None) is not None
-            else None
-        )
+        person_boxes, person_confs, body_kpts, body_kpt_confs = body
 
         rois = build_pose_candidate_rois(
             person_boxes, body_kpts, body_kpt_confs, w_img, h_img, person_confs=person_confs
@@ -925,6 +921,8 @@ class OptimalFlycamController:
     def process_frame(self, frame, conf_thres=0.5, far_field=None):
         t0 = time.perf_counter()
         h_img, w_img = frame.shape[:2]
+        if self.always_body_pose:
+            self._run_body_pose(frame)  # before any drawing, so the person model sees the clean frame
 
         if self.pose_model is not None:
             det = self._detect_hand_pose(frame, conf_thres=conf_thres, far_field=far_field)
@@ -955,6 +953,7 @@ class OptimalFlycamController:
                     "heatmap_gesture_prob": 0.0,
                     "latency_ms": latency_ms,
                 }
+                self.last_result.update(self._body_fields(frame, None))
                 cv2.putText(
                     frame,
                     "NO HAND -> CMD: HOVER (An toan)",
@@ -1053,6 +1052,9 @@ class OptimalFlycamController:
                 "heatmap_gesture_prob": heatmap_prob,
                 "latency_ms": latency_ms,
             }
+            hand_pts = [kps[i] for i in (0, 5, 9, 13, 17) if _is_valid_kp(kps[i])]
+            hand_center = np.mean(np.asarray(hand_pts, dtype=float), axis=0) if hand_pts else None
+            self.last_result.update(self._body_fields(frame, hand_center))
 
             stage_tag = "[ROI Zoom]" if stage != "full_frame" else "[Full]"
             if used_heatmap:
