@@ -31,6 +31,7 @@ class ControlConfig:
     point_extend_min: float = 1.2
     point_rest_y_max: float = -0.8    # the other wrist must be below this
     point_tol_deg: float = 30.0
+    point_len_margin: float = 0.2     # pointing arm must reach this much further than a hanging arm
 
     # gesture filter (section 4.3)
     min_stable_s: float = 0.066
