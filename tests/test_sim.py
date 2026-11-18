@@ -130,3 +130,17 @@ def test_land_sets_landed_flag(hovering):
     st = hovering.state()
     assert st.landed, "landed flag not set within 10 s of land()"
     assert st.altitude < 0.05
+
+
+def test_key_mapping_matches_user_frame():
+    from sim.teleop_keyboard import A, D, DOWN, LEFT, RIGHT, SPACE, UP, W, key_command
+
+    assert key_command({ord("w")}) == (1.0, 0.0, 0.0, 0.0)
+    assert key_command({ord("S")}) == (-1.0, 0.0, 0.0, 0.0)
+    assert key_command(set(D)) == (0.0, 1.0, 0.0, 0.0)
+    assert key_command(set(A)) == (0.0, -1.0, 0.0, 0.0)
+    assert key_command(set(UP)) == (0.0, 0.0, 1.0, 0.0)
+    assert key_command(set(DOWN)) == (0.0, 0.0, -1.0, 0.0)
+    assert key_command(set(LEFT))[3] > 0.0  # left turn is counter-clockwise
+    assert key_command(set(RIGHT))[3] < 0.0
+    assert key_command(set(W) | set(SPACE)) == (0.0, 0.0, 0.0, 0.0)

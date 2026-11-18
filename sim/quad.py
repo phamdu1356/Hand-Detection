@@ -204,6 +204,10 @@ class QuadSim:
             landed=self._mode == "landed",
         )
 
+    def keyboard_events(self) -> dict:
+        """PyBullet keyboard events ``{code: state}``; always empty in DIRECT mode."""
+        return self._pb.getKeyboardEvents()
+
     def close(self) -> None:
         self._pb.disconnect()
 
