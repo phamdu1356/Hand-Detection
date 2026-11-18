@@ -4,6 +4,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "demo"))
@@ -47,3 +48,10 @@ def test_draw_overlay_draws_on_copy_and_keeps_shape():
     assert img.any()
     assert not frame.any()          # the input frame is not modified
     assert out.mode in (Mode.LANDED, Mode.HOVER, Mode.TAKING_OFF, Mode.FOLLOW)
+
+
+@pytest.mark.parametrize("backend", ["mock", "sim"])
+def test_replay_reproduces_recorded_commands(tmp_path, backend):
+    log = tmp_path / "rec.csv"
+    assert fly_sim.main(["--synthetic", "--backend", backend, "--no-gui", "--log", str(log)]) == 0
+    assert fly_sim.main(["--replay", str(log), "--backend", backend, "--no-gui"]) == 0
