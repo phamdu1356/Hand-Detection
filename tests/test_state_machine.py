@@ -445,3 +445,76 @@ def test_property_sequences_reach_every_mode():
         for label, range_mode in _random_sequence(rng, 300):
             visited.add(sim.frame(label, range_mode).mode)
     assert visited == set(Mode)
+
+
+# ---------------------------------------------------------------- M1 at controller level
+
+_SEGMENTS = ("like", "fist", "palm", "ok", "three", "arms_up", "t_pose",
+             "point_right", "point_left", "point_up", "point_down", "none")
+
+
+def _segment_observation(rng, kind, t, scene):
+    """One observation that shows the gesture `kind` (held for a whole segment)."""
+    from tests.synth import BodyPose, HandPose, make_observation
+
+    palm = (rng.uniform(-0.6, 0.6), rng.uniform(-0.9, 0.2))
+    ratio = rng.choice([0.2, 0.3, 0.45, 0.6])
+    conf = rng.choice([0.9, 0.9, 0.3])
+    if kind in ("like", "fist", "palm", "ok", "three"):
+        body = BodyPose() if rng.random() < 0.8 else None
+        hand = HandPose(gesture=kind, palm=palm, ratio=ratio, conf=conf)
+        return make_observation(t, scene, body=body, hand=hand)
+    if kind == "arms_up":
+        return make_observation(t, scene, body=BodyPose(left="up", right="up"))
+    if kind == "t_pose":
+        return make_observation(t, scene, body=BodyPose(left="t", right="t"))
+    if kind.startswith("point_"):
+        return make_observation(t, scene, body=BodyPose(right=kind))
+    return make_observation(t, scene, body=None if rng.random() < 0.5 else BodyPose())
+
+
+def test_m1_cmd_nonzero_only_in_follow_or_point_move_on_1000_random_sequences():
+    """M1: over 1000 seeded random sequences, every frame with cmd != 0 is FOLLOW or POINT_MOVE.
+
+    Sequences are made of held gesture segments (so the machine really takes off, follows,
+    points and lands), with random scale, tilt, palm position, drone state and timing.
+    """
+    import random
+    from dataclasses import replace
+
+    from dronectl.backends.base import DroneState
+    from dronectl.pipeline import Controller
+    from tests.synth import Scene
+
+    rng = random.Random(1234)
+    nonzero_by_mode = {m: 0 for m in Mode}
+    takeoffs = lands = 0
+    for _ in range(1000):
+        ctl = Controller()
+        scene = Scene(shoulder_px=rng.choice([40.0, 80.0, 160.0]), tilt=rng.uniform(-0.3, 0.3))
+        t = 0.0
+        prev_mode = ctl.mode
+        frames = 0
+        while frames < 100:
+            kind = rng.choice(_SEGMENTS)
+            base = _segment_observation(rng, kind, 0.0, scene)
+            for _ in range(rng.randint(3, 60)):
+                t += 1.0 / 30.0 * rng.uniform(0.8, 1.2)
+                drone = DroneState(altitude=rng.choice([0.0, 0.5, 1.5]), landed=rng.random() < 0.5)
+                out = ctl.update(replace(base, t=t), drone)
+                frames += 1
+                if not out.cmd.is_zero():
+                    assert out.mode in MOVING_MODES, (out.mode, out.cmd)
+                    nonzero_by_mode[out.mode] += 1
+                if out.mode is Mode.LANDED:
+                    assert out.cmd.is_zero() and out.action != "land"
+                if out.action == "land":
+                    lands += 1
+                    assert prev_mode is Mode.HOVER and out.mode is Mode.LANDING
+                if out.action == "takeoff":
+                    takeoffs += 1
+                    assert prev_mode is Mode.LANDED
+                prev_mode = out.mode
+    # the property must not hold vacuously: every moving mode and both actions must occur
+    assert nonzero_by_mode[Mode.FOLLOW] > 0 and nonzero_by_mode[Mode.POINT_MOVE] > 0
+    assert takeoffs > 0 and lands > 0
