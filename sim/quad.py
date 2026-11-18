@@ -46,7 +46,8 @@ TILT_MAX = math.radians(25.0)
 THRUST_MAX = 2.5 * MASS * G
 TORQUE_MAX = 0.5  # N*m per axis
 
-KP_V = 2.5  # velocity loop P gain (1/s)
+KP_V = 2.5  # velocity loop P gain (1/s), when accelerating or holding
+KP_BRAKE = 5.0  # velocity loop P gain (1/s), when the error opposes the velocity (braking)
 KI_V = 0.5  # velocity loop I gain (1/s^2)
 INT_MAX = 2.0  # anti-windup clamp on the integral (m/s)
 
@@ -255,8 +256,13 @@ class QuadSim:
 
         # Velocity loop -> thrust vector.
         err = v_des - v
-        self._int_err = np.clip(self._int_err + err * DT_PHYS, -INT_MAX, INT_MAX)
-        a_cmd = KP_V * err + KI_V * self._int_err
+        # Integral action only on the vertical axis (it cancels mass and thrust bias). Horizontal
+        # motion has no bias, so an integrator there would only wind up and slow the braking.
+        self._int_err[2] = float(np.clip(self._int_err[2] + err[2] * DT_PHYS, -INT_MAX, INT_MAX))
+        # Braking (error opposes velocity) uses a stiffer P gain, so a stop takes under 0.5 s
+        # from 1.5 m/s. The gain for acceleration stays moderate to limit overshoot.
+        kp = np.where(err * v < 0.0, KP_BRAKE, KP_V)
+        a_cmd = kp * err + np.array([0.0, 0.0, KI_V * self._int_err[2]])
         f_des = MASS * (a_cmd + np.array([0.0, 0.0, G]))
         thrust = min(max(float(np.linalg.norm(f_des)), 0.0), THRUST_MAX)
         norm = float(np.linalg.norm(f_des))
