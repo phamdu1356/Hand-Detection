@@ -213,6 +213,14 @@ Kiểm tra log theo các chỉ tiêu M1, M2, M8, M9:
 .venv/bin/python tools/check_log.py logs/run1.csv
 ```
 
+Kiểm tra hướng 3D bằng model thật, không cần webcam. Script cắt bàn tay thật từ ảnh val, dịch, phóng to và xoay chúng như người dùng đưa tay trước webcam, rồi chạy qua cả chuỗi nhận diện, bộ điều khiển và sim. Kết quả là bảng xem mỗi trục (phải/trái, lên/xuống, tiến/lùi, xoay) có đi đúng hướng không. Script chạy hai cảnh: nền trống (không thấy vai) và ảnh có người thật (thấy vai):
+```bash
+.venv/bin/python tools/test_3d_real.py --pose-model hand_pose.pt --body-model yolo11n-pose.pt \
+    --val ../datasets/hand-keypoints/images/val
+```
+
+Quy ước: ảnh webcam dùng nguyên bản, không lật gương. Người dùng đứng đối diện camera, nên bên phải của họ nằm ở bên trái ảnh. Mọi lệnh "phải/trái" đều tính theo người dùng.
+
 Chỉnh thông số: sao chép `dronectl/config.py` thành YAML (ví dụ `my.yaml`), giữ những khóa cần đổi, rồi truyền bằng `--config my.yaml`. Khóa lạ sẽ bị báo lỗi.
 
 ### Bằng Docker (CPU, chậm hơn bản `.venv`)
