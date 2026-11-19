@@ -70,11 +70,11 @@ def _frame_for(hand_px_ratio=0.45, body=True):
 
 @pytest.mark.parametrize("hand_ok, has_frame, hs, prev, expected", [
     (True, False, 50.0, "none", "near"),          # hand but no shoulders: near (fallback)
-    (True, True, 0.40 * 160.0, "none", "near"),   # q = 0.40 >= 0.35
-    (True, True, 0.20 * 160.0, "near", "far"),    # q = 0.20 < 0.25
-    (True, True, 0.30 * 160.0, "near", "near"),   # band: keep previous
-    (True, True, 0.30 * 160.0, "far", "far"),     # band: keep previous
-    (True, True, 0.30 * 160.0, "none", "far"),    # band with no previous: far
+    (True, True, 0.35 * 160.0, "none", "near"),   # q = 0.35 >= 0.30
+    (True, True, 0.15 * 160.0, "near", "far"),    # q = 0.15 < 0.20
+    (True, True, 0.25 * 160.0, "near", "near"),   # band: keep previous
+    (True, True, 0.25 * 160.0, "far", "far"),     # band: keep previous
+    (True, True, 0.25 * 160.0, "none", "far"),    # band with no previous: far
     (False, True, None, "near", "far"),           # person only
     (False, False, None, "near", "none"),         # nothing
 ])
@@ -92,7 +92,7 @@ def test_range_does_not_flicker_inside_hysteresis_band():
     seen = set()
     scene = Scene()
     for i in range(300):
-        ratio = 0.30 + 0.03 * math.sin(i / 5.0)     # oscillates within [0.27, 0.33]
+        ratio = 0.25 + 0.03 * math.sin(i / 5.0)     # oscillates within [0.22, 0.28]
         obs = make_observation(i / FPS, scene, body=DEFAULT_BODY,
                                hand=HandPose(gesture="palm", ratio=ratio))
         seen.add(ctl.update(obs).range_mode)
@@ -104,7 +104,7 @@ def test_range_stays_near_inside_band_once_near():
     scene = Scene()
     modes = []
     for i in range(300):
-        ratio = 0.45 if i < 5 else 0.30 + 0.03 * math.sin(i / 5.0)
+        ratio = 0.45 if i < 5 else 0.25 + 0.03 * math.sin(i / 5.0)
         obs = make_observation(i / FPS, scene, body=DEFAULT_BODY,
                                hand=HandPose(gesture="palm", ratio=ratio))
         modes.append(ctl.update(obs).range_mode)
@@ -116,8 +116,16 @@ def test_range_switches_to_far_when_hand_shrinks():
     scene = Scene()
     obs = make_observation(0.0, scene, body=DEFAULT_BODY, hand=HandPose(gesture="palm", ratio=0.45))
     assert ctl.update(obs).range_mode == "near"
-    obs = make_observation(1 / FPS, scene, body=DEFAULT_BODY, hand=HandPose(gesture="palm", ratio=0.2))
+    obs = make_observation(1 / FPS, scene, body=DEFAULT_BODY, hand=HandPose(gesture="palm", ratio=0.15))
     assert ctl.update(obs).range_mode == "far"
+
+
+def test_choose_range_lock_near_keeps_a_small_hand_near_in_follow():
+    from dronectl.body_frame import shoulder_frame
+    frame = shoulder_frame(_frame_for(body=True).body)
+    cfg = ControlConfig()
+    assert choose_range(cfg, True, frame, 0.10 * 160.0, "near", lock_near=True) == "near"
+    assert choose_range(cfg, False, frame, None, "near", lock_near=True) == "far"   # no hand: not locked
 
 
 # ---------------------------------------------------------------- scripted scenarios
@@ -198,13 +206,47 @@ def test_hand_and_person_lost_in_follow_hovers_within_0_6_seconds():
     assert np.allclose(r.mock.vel, 0.0, atol=1e-9)                       # drone does not drift on its own
 
 
-def test_hand_lost_while_person_visible_hovers_at_once():
+def _following_runner():
     r = Runner()
     r.run(1.2, DEFAULT_BODY, _const(HandPose("like")))
     r.wait_until(lambda r: r.ctl.mode is Mode.HOVER, DEFAULT_BODY, HandPose("fist"))
     r.run(0.5, DEFAULT_BODY, _const(HandPose("fist")))
-    r.frame(DEFAULT_BODY, None)                                           # far range now
+    assert r.ctl.mode is Mode.FOLLOW
+    return r
+
+
+def test_hand_lost_while_person_visible_hovers_after_follow_lost_s():
+    r = _following_runner()
+    r.run(0.2, DEFAULT_BODY)                                              # far range, shorter than 0.3 s
+    assert r.ctl.mode is Mode.FOLLOW
+    r.run(0.2, DEFAULT_BODY)
     assert r.ctl.mode is Mode.HOVER
+
+
+def test_short_hand_dropout_keeps_follow_and_the_command():
+    r = _following_runner()
+    r.run(1.0, DEFAULT_BODY, _const(HandPose("fist", palm=(0.6, 0.0))))
+    before = r.outs[-1].cmd.right
+    assert before > 0.3
+    r.run(0.2, DEFAULT_BODY)                                              # 6 frames without a hand
+    assert r.ctl.mode is Mode.FOLLOW
+    assert r.outs[-1].cmd.right >= 0.9 * before                          # held, not decayed
+    r.run(0.5, DEFAULT_BODY, _const(HandPose("fist", palm=(0.6, 0.0))))
+    assert r.ctl.mode is Mode.FOLLOW
+
+
+def test_pulling_the_hand_back_flies_backward_without_leaving_follow():
+    r = _following_runner()
+    r.run(1.5, DEFAULT_BODY, _const(HandPose("fist", ratio=0.15)))       # below far_enter_q
+    assert r.ctl.mode is Mode.FOLLOW
+    assert r.outs[-1].cmd.forward < -0.5
+
+
+def test_fist_misread_as_like_keeps_follow():
+    r = _following_runner()
+    for k in range(60):
+        r.frame(DEFAULT_BODY, HandPose("like" if k % 3 else "fist"))
+    assert r.ctl.mode is Mode.FOLLOW
 
 
 def test_pointing_right_moves_right_in_far_range():

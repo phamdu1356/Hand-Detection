@@ -53,14 +53,21 @@ def rate_limit(prev: float, target: float, dt: float, accel: float, decel: float
 class Joystick:
     def __init__(self, cfg: ControlConfig | None = None):
         self.cfg = cfg or ControlConfig()
-        self.origin: Origin | None = None
-        self._ema = np.zeros(4)
-        self._out = np.zeros(4)
+        self.reset()
 
     def reset(self):
         self.origin = None
         self._ema = np.zeros(4)
         self._out = np.zeros(4)
+        self._ez: float | None = None
+        self.last_target = np.zeros(4)
+
+    def smooth_error(self, err):
+        """EMA on the forward error only. Hand size jitters more than position and angle."""
+        ex, ey, ez, eyaw = err
+        a = self.cfg.ez_alpha
+        self._ez = ez if self._ez is None else self._ez + a * (ez - self._ez)
+        return ex, ey, self._ez, eyaw
 
     def anchor(self, frame: Frame, hand_kps) -> bool:
         """Store the origin from the current hand. Returns False when the hand cannot be measured."""
@@ -102,7 +109,8 @@ class Joystick:
         right = shape(ex, dz_xy, c.expo_alpha) * c.v_h
         up = shape(ey, dz_xy, c.expo_alpha) * c.v_v
         yaw = -shape(eyaw, dz_yaw, c.expo_alpha) * math.radians(c.w_yaw_deg)
-        return np.array([fwd, right, up, yaw])
+        self.last_target = np.array([fwd, right, up, yaw])
+        return self.last_target.copy()
 
     def point_target(self, direction: str) -> np.ndarray:
         """Constant far-range target for POINT_MOVE, in the same units as targets()."""

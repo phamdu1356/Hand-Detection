@@ -128,11 +128,13 @@ def test_row2_range_none_for_half_second_stops_flight():
     assert sim.fsm.mode is Mode.HOVER
 
 
-def test_row2_range_none_stops_follow_at_once_through_row8():
+def test_row2_range_none_stops_follow_through_row8_before_row2():
     sim = _flying()
     sim.hold("fist", "near", 0.5)
-    sim.hold("none", "none", 0.05)
-    assert sim.fsm.mode is Mode.HOVER        # range not near: row 8, before row 2 time runs out
+    sim.hold("none", "none", 0.2)
+    assert sim.fsm.mode is Mode.FOLLOW       # short dropout tolerated
+    sim.hold("none", "none", 0.2)
+    assert sim.fsm.mode is Mode.HOVER        # row 8 at follow_lost_s, before row 2 at 0.5 s
 
 
 def test_row2_short_gap_in_range_none_keeps_flying():
@@ -269,17 +271,35 @@ def test_row7_fist_in_far_range_does_not_enter_follow():
 def test_row8_other_label_for_0_15s_leaves_follow():
     sim = _flying()
     sim.hold("fist", "near", 0.3)
-    sim.hold("like", "near", 0.1)
+    sim.hold("ok", "near", 0.1)
     assert sim.fsm.mode is Mode.FOLLOW
-    sim.hold("like", "near", 0.1)
+    sim.hold("ok", "near", 0.1)
     assert sim.fsm.mode is Mode.HOVER
 
 
-def test_row8_range_not_near_leaves_follow_immediately():
+def test_row8_like_counts_as_fist_in_follow():
     sim = _flying()
     sim.hold("fist", "near", 0.3)
-    sim.frame("fist", "far")
+    sim.hold("like", "near", 2.0)
+    assert sim.fsm.mode is Mode.FOLLOW
+
+
+def test_row8_range_not_near_leaves_follow_after_follow_lost_s():
+    sim = _flying()
+    sim.hold("fist", "near", 0.3)
+    sim.hold("fist", "far", 0.2)
+    assert sim.fsm.mode is Mode.FOLLOW
+    sim.hold("fist", "far", 0.2)
     assert sim.fsm.mode is Mode.HOVER
+
+
+def test_row8_dropout_timer_restarts_when_the_hand_returns():
+    sim = _flying()
+    sim.hold("fist", "near", 0.3)
+    for _ in range(5):
+        sim.hold("none", "near", 0.2)
+        sim.hold("fist", "near", 0.1)
+    assert sim.fsm.mode is Mode.FOLLOW
 
 
 def test_row8_fist_keeps_follow():

@@ -6,7 +6,7 @@ from dronectl.config import ControlConfig, load_config, validate
 
 def test_defaults_match_spec_values():
     cfg = ControlConfig()
-    assert cfg.near_enter_q == 0.35 and cfg.far_enter_q == 0.25
+    assert cfg.near_enter_q == 0.30 and cfg.far_enter_q == 0.20
     assert cfg.v_h == 1.5 and cfg.v_v == 1.0 and cfg.w_yaw_deg == 45.0
     assert cfg.ema_alpha == 0.35 and cfg.expo_alpha == 0.5
     assert cfg.classifier == "rules"

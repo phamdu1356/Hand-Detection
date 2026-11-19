@@ -20,8 +20,8 @@ class ControlConfig:
     classifier: str = "rules"         # "rules" only until phase 4 adds "mlp"
 
     # range selection (section 6.1)
-    near_enter_q: float = 0.35        # hand size / shoulder width to enter near
-    far_enter_q: float = 0.25         # below this, switch to far
+    near_enter_q: float = 0.30        # hand size / shoulder width to enter near
+    far_enter_q: float = 0.20         # below this, switch to far (not while FOLLOW holds a hand)
 
     # far pose rules (section 4.2)
     arms_up_y_min: float = 1.0
@@ -50,6 +50,7 @@ class ControlConfig:
     takeoff_timeout_s: float = 8.0
     follow_hold_s: float = 0.2        # fist held to enter FOLLOW
     follow_exit_s: float = 0.15       # other label held to leave FOLLOW
+    follow_lost_s: float = 0.3        # hand lost or range not near this long leaves FOLLOW
     point_hold_s: float = 0.5         # point held to enter POINT_MOVE
     point_exit_s: float = 0.3         # other label held to leave POINT_MOVE
 
@@ -66,6 +67,7 @@ class ControlConfig:
     w_yaw_deg: float = 45.0           # deg/s, yaw maximum
     v_far: float = 0.5                # m/s, POINT_MOVE speed
     ema_alpha: float = 0.35
+    ez_alpha: float = 0.3             # extra EMA on the raw forward error (hand size is noisy)
     acc_h: float = 2.0                # m/s^2, horizontal increase limit
     acc_v: float = 1.5                # m/s^2, vertical increase limit
     acc_yaw_deg: float = 90.0         # deg/s^2, yaw increase limit
@@ -90,6 +92,10 @@ def validate(cfg: ControlConfig) -> ControlConfig:
         raise ValueError("require 0 < dead_yaw_deg < full_yaw_deg")
     if not 0.0 < cfg.ema_alpha <= 1.0 or not 0.0 <= cfg.expo_alpha <= 1.0:
         raise ValueError("ema_alpha must be in (0, 1] and expo_alpha in [0, 1]")
+    if not 0.0 < cfg.ez_alpha <= 1.0:
+        raise ValueError("ez_alpha must be in (0, 1]")
+    if cfg.follow_lost_s < 0.0:
+        raise ValueError("follow_lost_s must not be negative")
     if min(cfg.v_h, cfg.v_v, cfg.w_yaw_deg, cfg.v_far, cfg.acc_h, cfg.acc_v, cfg.acc_yaw_deg,
            cfg.dec_lin, cfg.dec_yaw_deg, cfg.fallback_k) <= 0.0:
         raise ValueError("speed, acceleration and fallback_k must be positive")

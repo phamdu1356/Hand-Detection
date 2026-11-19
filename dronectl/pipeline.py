@@ -20,11 +20,15 @@ _MIN_DT, _MAX_DT = 1e-3, 0.2
 
 
 def choose_range(cfg: ControlConfig, hand_ok: bool, body_frame: Frame | None,
-                 hand_px: float | None, prev: str) -> str:
-    """near / far / none (plan 6.1). Between far_enter_q and near_enter_q the previous range is kept."""
+                 hand_px: float | None, prev: str, lock_near: bool = False) -> str:
+    """near / far / none (plan 6.1). Between far_enter_q and near_enter_q the previous range is kept.
+
+    lock_near: FOLLOW is active. A usable hand then stays near whatever its size, because a
+    hand pulled back to fly backward shrinks toward far_enter_q.
+    """
     if hand_ok:
-        if body_frame is None:
-            return "near"                  # hand but no shoulders: too close, use fallback
+        if body_frame is None or lock_near:
+            return "near"                  # no shoulders: too close, use fallback
         q = hand_px / body_frame.scale
         if q >= cfg.near_enter_q:
             return "near"
@@ -74,7 +78,8 @@ class Controller:
             unit_px = self.joy.origin.hs0 if anchored else hand_px
             frame = fallback_frame(cfg.fallback_k * unit_px)
 
-        range_mode = choose_range(cfg, hand is not None, body_frame, hand_px, self._range)
+        range_mode = choose_range(cfg, hand is not None, body_frame, hand_px, self._range,
+                                  lock_near=self.fsm.mode is Mode.FOLLOW)
         self._range = range_mode
 
         if range_mode == "near":
@@ -144,6 +149,10 @@ class Controller:
             return self.joy.step(np.zeros(4), dt), dbg
         err = self.joy.raw_error(frame, hand.kps) if hand is not None else None
         if err is None:
-            return self.joy.step(np.zeros(4), dt), dbg
+            # hand lost for a moment: keep the last target, the state machine ends FOLLOW
+            # after follow_lost_s
+            dbg["held"] = True
+            return self.joy.step(self.joy.last_target, dt), dbg
+        err = self.joy.smooth_error(err)
         dbg["err"] = tuple(float(v) for v in err)
         return self.joy.step(self.joy.targets(err), dt), dbg

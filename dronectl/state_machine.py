@@ -33,6 +33,7 @@ class StateMachine:
         self.mode = Mode.LANDED
         self.point_dir: str | None = None   # "right" | "left" | "up" | "down" while POINT_MOVE
         self.entered_t = 0.0
+        self._follow_off_since: float | None = None   # FOLLOW without a usable near hand
 
     def step(self, t: float, range_mode: str, flt, none_s: float,
              altitude: float, landed: bool) -> Decision:
@@ -50,6 +51,7 @@ class StateMachine:
         def go(new: Mode, action: str | None = None, reason: str = "") -> Decision:
             self.mode = new
             self.entered_t = t
+            self._follow_off_since = None
             if new is not Mode.POINT_MOVE:
                 self.point_dir = None
             return Decision(new, action, new is not prev, reason)
@@ -102,11 +104,18 @@ class StateMachine:
                 return Decision(Mode.POINT_MOVE, None, True, f"point {direction} held")
 
         if mode is Mode.FOLLOW:
-            # 8: leave FOLLOW on another stable label, or as soon as range is not near
-            if not near:
-                return go(Mode.HOVER, reason="range not near")
-            if flt.label != "fist" and flt.held_s >= c.follow_exit_s:
-                return go(Mode.HOVER, reason="fist released")
+            # 8: leave FOLLOW when the hand is gone (or range not near) for follow_lost_s, or
+            # on another label held follow_exit_s. "like" counts as fist here: with the thumb
+            # half out the rules read a fist as like, and like means nothing while flying.
+            if not near or flt.label == "none":
+                if self._follow_off_since is None:
+                    self._follow_off_since = t
+                if t - self._follow_off_since >= c.follow_lost_s:
+                    return go(Mode.HOVER, reason="hand lost")
+            else:
+                self._follow_off_since = None
+                if flt.label not in ("fist", "like") and flt.held_s >= c.follow_exit_s:
+                    return go(Mode.HOVER, reason="fist released")
 
         if mode is Mode.POINT_MOVE:
             # 10: leave POINT_MOVE when the label is not the same direction for a while
