@@ -205,6 +205,11 @@ class QuadSim:
             landed=self._mode == "landed",
         )
 
+    @property
+    def client(self):
+        """The PyBullet client, for drawing extra debug geometry in the same world."""
+        return self._pb
+
     def keyboard_events(self) -> dict:
         """PyBullet keyboard events ``{code: state}``; always empty in DIRECT mode."""
         return self._pb.getKeyboardEvents()

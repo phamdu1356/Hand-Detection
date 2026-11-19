@@ -2,7 +2,7 @@
 
 near_gesture: static hand shape from the hand keypoints (rule based until phase 4).
 far_gesture:  arm poses from the body keypoints in the shoulder frame.
-GestureFilter: time-based filter with a 100 ms gap tolerance and a latch.
+GestureFilter: time-based filter with a gap tolerance (gap_tol_s) and a latch.
 """
 from __future__ import annotations
 

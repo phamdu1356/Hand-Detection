@@ -35,7 +35,7 @@ class ControlConfig:
 
     # gesture filter (section 4.3)
     min_stable_s: float = 0.066
-    gap_tol_s: float = 0.1
+    gap_tol_s: float = 0.25        # detector dropouts come in bursts of up to ~7 frames
     latch_release_s: float = 0.3
 
     # state machine (section 6.2)
@@ -52,7 +52,7 @@ class ControlConfig:
     follow_exit_s: float = 0.15       # other label held to leave FOLLOW
     follow_lost_s: float = 0.3        # hand lost or range not near this long leaves FOLLOW
     point_hold_s: float = 0.5         # point held to enter POINT_MOVE
-    point_exit_s: float = 0.3         # other label held to leave POINT_MOVE
+    point_exit_s: float = 0.2         # other label held to leave POINT_MOVE (after gap_tol_s)
 
     # joystick (section 5)
     full_xy: float = 0.8              # body units giving full lateral and vertical input

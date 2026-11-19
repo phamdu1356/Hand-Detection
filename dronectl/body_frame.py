@@ -87,7 +87,12 @@ def palm_center(hand_kps):
 
 
 def hand_size(hand_kps):
-    """Median of five palm lengths, in pixels. Robust to a few segments shortened by tilt."""
+    """Palm size in pixels: the larger of the median wrist-to-MCP length and 1.25 x the MCP span.
+
+    Foreshortening only shortens a length. A hand seen from below (a drone on the ground)
+    shortens the wrist-to-MCP lengths, a hand turned sideways shortens the span, so the larger
+    of the two is the better estimate of the true size.
+    """
     kps = np.asarray(hand_kps, dtype=float)
     needed = (0, 5, 9, 13, 17)
     if not all(_is_valid_kp(kps[i]) for i in needed):
@@ -98,9 +103,8 @@ def hand_size(hand_kps):
         np.linalg.norm(kps[9] - w),
         np.linalg.norm(kps[13] - w),
         np.linalg.norm(kps[17] - w),
-        1.25 * np.linalg.norm(kps[5] - kps[17]),
     ]
-    size = float(np.median(lengths))
+    size = max(float(np.median(lengths)), 1.25 * float(np.linalg.norm(kps[5] - kps[17])))
     return size if size > 1e-6 else None
 
 

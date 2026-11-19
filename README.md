@@ -221,6 +221,32 @@ Kiểm tra hướng 3D bằng model thật, không cần webcam. Script cắt b�
 
 Quy ước: ảnh webcam dùng nguyên bản, không lật gương. Người dùng đứng đối diện camera, nên bên phải của họ nằm ở bên trái ảnh. Mọi lệnh "phải/trái" đều tính theo người dùng.
 
+### Giả lập 3D: người ảo và camera gắn trên drone
+
+`tools/fly_3d.py` dựng một người 3D có khớp (thân, tay, 21 khớp bàn tay) đứng trước drone. Camera gắn trên drone, có gimbal nghiêng tự động, quay người đó. Mỗi khung, khớp 3D được chiếu qua camera drone, thêm nhiễu giống webcam (rung khớp, mất tay theo từng đợt, nắm tay bị đọc thành like, trễ 2 khung), rồi đưa vào bộ điều khiển thật. Khi drone bay hoặc xoay, hình người trong camera thay đổi theo. Đây là vòng kín mà webcam laptop không mô phỏng được.
+
+Chạy kịch bản có cửa sổ 3D (người, drone, vệt bay màu xanh, tia camera màu vàng) và cửa sổ "drone camera" (thứ bộ điều khiển nhìn thấy):
+```bash
+.venv/bin/python tools/fly_3d.py --scenario axes
+```
+
+Chạy nhiều lần không mở cửa sổ để đo độ ổn định. Mức nhiễu chọn trong `none`, `webcam`, `harsh`:
+```bash
+.venv/bin/python tools/fly_3d.py --scenario axes --no-gui --repeat 10 --noise webcam
+```
+
+Kịch bản `far`: người đứng cách 3 m, giơ hai tay để cất cánh, chỉ tay để bay, dang tay để dừng, giơ hai tay để hạ cánh:
+```bash
+.venv/bin/python tools/fly_3d.py --scenario far
+```
+
+Dùng webcam điều khiển người ảo: các khớp đọc được từ bạn sẽ làm người 3D cử động, và drone phản ứng theo những gì camera của nó thấy. `--webcam-distance` là khoảng cách từ bạn tới webcam, tính bằng mét:
+```bash
+.venv/bin/python tools/fly_3d.py --webcam 0 --pose-model hand_pose.pt --body-model yolo11n-pose.pt
+```
+
+Phím trong cửa sổ "drone camera": `q` thoát, `space` dừng khẩn cấp.
+
 Chỉnh thông số: sao chép `dronectl/config.py` thành YAML (ví dụ `my.yaml`), giữ những khóa cần đổi, rồi truyền bằng `--config my.yaml`. Khóa lạ sẽ bị báo lỗi.
 
 ### Bằng Docker (CPU, chậm hơn bản `.venv`)

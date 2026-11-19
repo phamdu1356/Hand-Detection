@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dronectl.types import BodyObs, HandObs, Observation
+from sim3d import hand_template as _ht
 
 
 def rot(angle: float) -> np.ndarray:
@@ -92,49 +93,8 @@ def body_points(pose: BodyPose) -> np.ndarray:
 
 # ---------------------------------------------------------------- hand
 
-# gesture -> ((index, middle, ring, pinky) open?, thumb open? or "touch")
-GESTURE_SHAPES = {
-    "palm": ((True, True, True, True), True),
-    "four": ((True, True, True, True), False),
-    "fist": ((False, False, False, False), False),
-    "like": ((False, False, False, False), True),
-    "ok": ((True, True, True, True), "touch"),
-    "one": ((True, False, False, False), False),
-    "peace_inverted": ((True, True, False, False), False),
-    "three": ((True, True, True, False), False),
-}
-GESTURES = tuple(GESTURE_SHAPES)
-_PALM_IDX = [0, 5, 9, 13, 17]
-
-
-def hand_points(gesture: str) -> np.ndarray:
-    """21 hand keypoints in hand units, y up, wrist at the origin."""
-    if gesture not in GESTURE_SHAPES:
-        raise ValueError(f"unknown gesture: {gesture!r}")
-    fingers, thumb = GESTURE_SHAPES[gesture]
-    kp = np.zeros((21, 2))
-    mcp = {5: (-0.42, 0.92), 9: (0.0, 1.0), 13: (0.30, 0.94), 17: (0.62, 0.80)}
-    for base, is_open in zip((5, 9, 13, 17), fingers):
-        mx, my = mcp[base]
-        kp[base] = (mx, my)
-        if is_open:
-            kp[base + 1] = (mx, my + 0.5)
-            kp[base + 2] = (mx, my + 0.85)
-            kp[base + 3] = (mx, my + 1.15)
-        else:  # curled: tip folds back toward the palm
-            kp[base + 1] = (mx, my + 0.45)
-            kp[base + 2] = (mx, my + 0.3)
-            kp[base + 3] = (mx, my + 0.1)
-    kp[1] = (-0.35, 0.05)
-    kp[2] = (-0.7, 0.45)
-    if thumb is True:
-        kp[3], kp[4] = (-0.9, 0.75), (-1.12, 1.02)
-    elif thumb is False:
-        kp[3], kp[4] = (-0.45, 0.35), (-0.2, 0.3)
-    else:  # "touch": thumb tip meets the index fingertip
-        kp[3] = (-0.6, 1.3)
-        kp[4] = kp[8] + np.array([0.06, 0.04])
-    return kp
+GESTURE_SHAPES, GESTURES, _PALM_IDX = _ht.GESTURE_SHAPES, _ht.GESTURES, _ht.PALM_IDX
+hand_points = _ht.hand_points
 
 
 def hand_px(gesture: str, target_px, length_px: float, angle: float) -> np.ndarray:

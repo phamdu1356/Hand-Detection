@@ -35,5 +35,10 @@ class PyBulletSimBackend:
         return DroneState(pos=np.asarray(st.pos, dtype=float), vel=np.asarray(st.vel, dtype=float),
                           yaw=float(st.yaw), altitude=float(st.altitude), landed=bool(st.landed))
 
+    @property
+    def client(self):
+        """The PyBullet client of the simulated world (for extra debug drawing)."""
+        return self._sim.client
+
     def close(self) -> None:
         self._sim.close()

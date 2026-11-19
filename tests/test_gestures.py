@@ -183,9 +183,9 @@ def test_gap_of_exactly_tolerance_does_not_reset():
 
 def test_gap_longer_than_tolerance_resets():
     flt = GestureFilter()
-    _feed(flt, [(0.0, "fist"), (0.5, "fist"), (0.55, "none"), (0.7, "none")])
+    _feed(flt, [(0.0, "fist"), (0.5, "fist"), (0.55, "none"), (0.8, "none")])
     assert flt.label == "none"
-    _feed(flt, [(0.75, "fist")])
+    _feed(flt, [(0.85, "fist")])
     assert flt.held("fist") == pytest.approx(0.0)
 
 
