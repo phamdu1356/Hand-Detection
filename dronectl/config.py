@@ -52,6 +52,7 @@ class ControlConfig:
     follow_exit_s: float = 0.15       # other label held to leave FOLLOW
     follow_lost_s: float = 0.3        # hand lost or range not near this long leaves FOLLOW
     point_hold_s: float = 0.5         # point held to enter POINT_MOVE
+    finger_hold_s: float = 0.25       # index-finger direction in hand-only mode
     point_exit_s: float = 0.2         # other label held to leave POINT_MOVE (after gap_tol_s)
 
     # joystick (section 5)
@@ -96,6 +97,8 @@ def validate(cfg: ControlConfig) -> ControlConfig:
         raise ValueError("ez_alpha must be in (0, 1]")
     if cfg.follow_lost_s < 0.0:
         raise ValueError("follow_lost_s must not be negative")
+    if cfg.finger_hold_s <= 0:
+        raise ValueError("finger_hold_s must be positive")
     if min(cfg.v_h, cfg.v_v, cfg.w_yaw_deg, cfg.v_far, cfg.acc_h, cfg.acc_v, cfg.acc_yaw_deg,
            cfg.dec_lin, cfg.dec_yaw_deg, cfg.fallback_k) <= 0.0:
         raise ValueError("speed, acceleration and fallback_k must be positive")

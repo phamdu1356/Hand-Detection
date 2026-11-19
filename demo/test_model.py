@@ -427,6 +427,7 @@ class OptimalFlycamController:
         use_temporal_roi=True,
         preload_body_pose=False,
         always_body_pose=False,
+        enable_body_pose=True,
     ):
         self.base_dir = base_dir
         self.cnn_path = cnn_path
@@ -440,7 +441,7 @@ class OptimalFlycamController:
         self.body_pose_model = None
         self.body_pose_model_path = None
         self.body_is_onnx = False
-        self._body_pose_unavailable = False
+        self._body_pose_unavailable = not enable_body_pose
         self.cnn_model = None
 
         self.far_field_mode = far_field_mode

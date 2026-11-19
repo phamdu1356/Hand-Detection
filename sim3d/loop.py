@@ -21,14 +21,14 @@ AIM_BELOW = 0.15     # the gimbal aims this far below the shoulders, where the h
 class Sim3D:
     def __init__(self, cfg: ControlConfig | None = None, noise="webcam", seed: int = 0,
                  gui: bool = False, person: Person | None = None, camera: DroneCamera | None = None,
-                 wind: float = 0.0, fps: float = FPS):
+                 wind: float = 0.0, fps: float = FPS, hand_only: bool = False):
         from dronectl.backends.pybullet_sim import PyBulletSimBackend
 
         self.cfg = cfg or ControlConfig()
-        self.ctl = Controller(self.cfg)
+        self.ctl = Controller(self.cfg, hand_only=hand_only)
         self.noise = noise if isinstance(noise, WebcamNoise) else WebcamNoise(noise, seed)
         self.person = person or Person()
-        self.camera = camera or DroneCamera()
+        self.camera = camera or (DroneCamera(gimbal=False, pitch_up_deg=6.0) if hand_only else DroneCamera())
         self.backend = PyBulletSimBackend(gui=gui, wind=wind, seed=seed)
         self.dt = 1.0 / fps
         self.t = 0.0

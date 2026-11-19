@@ -36,14 +36,14 @@ class StateMachine:
         self._follow_off_since: float | None = None   # FOLLOW without a usable near hand
 
     def step(self, t: float, range_mode: str, flt, none_s: float,
-             altitude: float, landed: bool) -> Decision:
+             altitude: float, landed: bool, *, hand_only=False, interrupted=False) -> Decision:
         """Advance one frame.
 
         flt is a gestures.GestureFilter. none_s is how long range_mode has been "none".
         altitude and landed come from the backend DroneState.
         """
         c = self.cfg
-        near = range_mode == "near"
+        near = range_mode in ("near", "hand")
         far = range_mode == "far"
         mode = self.mode
         prev = mode
@@ -57,7 +57,10 @@ class StateMachine:
             return Decision(new, action, new is not prev, reason)
 
         # 1, 2: stop from any flying mode
-        if mode in FLYING_MODES:
+        if hand_only and mode is Mode.POINT_MOVE:
+            if interrupted or range_mode != "hand" or flt.label != f"point_{self.point_dir}":
+                return go(Mode.HOVER, reason="hand direction released")
+        if mode in FLYING_MODES and not (hand_only and mode in (Mode.LANDING, Mode.TAKING_OFF)):
             if (near and flt.stable() == "palm") or (far and flt.held("t_pose") >= c.t_pose_stop_s):
                 return go(Mode.HOVER, reason="stop: palm or t-pose")
             if none_s >= c.range_none_stop_s:
@@ -65,7 +68,7 @@ class StateMachine:
 
         # 3: land on ok (near) or both arms up (far)
         if mode is Mode.HOVER:
-            if near and flt.held("ok") >= c.land_hold_near_s:
+            if near and flt.held_for("ok", c.land_hold_near_s):
                 flt.latch("ok")
                 return go(Mode.LANDING, "land", "ok held")
             if far and flt.held("arms_up") >= c.land_hold_far_s:
@@ -74,7 +77,7 @@ class StateMachine:
 
         # 4: take off on like (near) or both arms up (far)
         if mode is Mode.LANDED:
-            if near and flt.held("like") >= c.takeoff_hold_near_s:
+            if near and flt.held_for("like", c.takeoff_hold_near_s):
                 flt.latch("like")
                 return go(Mode.TAKING_OFF, "takeoff", "like held")
             if far and flt.held("arms_up") >= c.takeoff_hold_far_s:
@@ -94,10 +97,11 @@ class StateMachine:
 
         if mode is Mode.HOVER:
             # 7: fist held -> FOLLOW (near only)
-            if near and flt.held("fist") >= c.follow_hold_s:
+            if not hand_only and near and flt.held("fist") >= c.follow_hold_s:
                 return go(Mode.FOLLOW, reason="fist held: follow")
             # 9: point held -> POINT_MOVE (far only)
-            if far and flt.label.startswith("point_") and flt.held(flt.label) >= c.point_hold_s:
+            point_hold = c.finger_hold_s if hand_only else c.point_hold_s
+            if (far or range_mode == "hand") and flt.label.startswith("point_") and flt.held_for(flt.label, point_hold):
                 direction = flt.label[len("point_"):]
                 go(Mode.POINT_MOVE, reason=f"point {direction} held")
                 self.point_dir = direction

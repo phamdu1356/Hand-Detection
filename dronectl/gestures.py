@@ -7,6 +7,7 @@ GestureFilter: time-based filter with a gap tolerance (gap_tol_s) and a latch.
 from __future__ import annotations
 
 import math
+from collections import deque
 
 import numpy as np
 
@@ -48,6 +49,26 @@ def _quantise_direction(vec, tol_deg: float) -> str:
         if gap < best_gap:
             best, best_gap = name, gap
     return f"point_{best}" if best_gap <= tol_deg else "none"
+
+
+def hand_command(hand, cfg: ControlConfig) -> str:
+    """Use only hand shape and finger direction in the unmirrored camera image."""
+    if hand is None:
+        return "none"
+    # Missing tips would otherwise count as curled fingers in the shape rules.
+    indices = [0, 2, 4, 5, 6, 8, 9, 10, 12, 14, 16, 17, 18, 20]
+    pts = hand.kps[indices]
+    if (not np.all(hand.kps_conf[indices] >= cfg.hand_conf_min)
+            or not np.isfinite(pts).all() or not (pts > 0).any(axis=1).all()):
+        return "none"
+    shape, _, _ = analyze_hand_keypoints(hand.kps)
+    if shape == "one":
+        # Image left is the facing user's right. Image up is negative y.
+        direction = hand.kps[5] - hand.kps[8]
+        if np.linalg.norm(direction) < 1.0:
+            return "none"
+        return _quantise_direction(direction, cfg.point_tol_deg)
+    return _RULE_TO_NEAR.get(shape, "none")
 
 
 def far_gesture(body, frame: Frame | None, cfg: ControlConfig | None = None) -> str:
@@ -159,9 +180,44 @@ class GestureFilter:
             return 0.0
         return self.held_s
 
+    def held_for(self, label: str, seconds: float) -> bool:
+        return self.held(label) >= seconds
+
     def stable(self) -> str:
         return self.label if self.held_s >= self.cfg.min_stable_s else "none"
 
     def latch(self, label: str):
         self._latched = label
         self._away_since = None
+
+
+class HandCommandFilter(GestureFilter):
+    """Confirm a visual command by time in view, including brief detector dropouts."""
+
+    def reset(self):
+        super().reset()
+        self.samples = deque()
+
+    def update(self, t: float, raw: str):
+        super().update(t, raw)
+        self.samples.append((t, raw))
+        horizon = max(self.cfg.takeoff_hold_near_s, self.cfg.land_hold_near_s, self.cfg.finger_hold_s)
+        while len(self.samples) > 1 and self.samples[1][0] <= t - horizon:
+            self.samples.popleft()
+
+    def held_for(self, label: str, seconds: float) -> bool:
+        if not self.samples or self.samples[-1][1] != label or self.latched == label:
+            return False
+        start = self._t - seconds
+        if self.samples[0][0] > start:
+            return False
+        # Weight by time, so the threshold has the same meaning at different frame rates.
+        end = self._t
+        visible = 0.0
+        for t, raw in reversed(self.samples):
+            if raw == label:
+                visible += end - max(t, start)
+            if t <= start:
+                break
+            end = t
+        return visible >= 0.75 * seconds

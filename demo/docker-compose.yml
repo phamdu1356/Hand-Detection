@@ -32,5 +32,4 @@ services:
       - /dev/video0:/dev/video0
     command: ["--backend", "sim", "--camera", "0",
               "--pose-model", "/app/models/hand_pose.pt",
-              "--body-model", "/app/models/yolo11n-pose.pt",
               "--log", "/app/logs/run1.csv"]

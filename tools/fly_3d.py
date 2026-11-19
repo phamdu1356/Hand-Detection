@@ -1,6 +1,7 @@
 """3D simulator: a jointed person filmed by a camera on the drone, closed loop with the controller.
 
 Scripted (repeatable, used as a test):
+  .venv/bin/python tools/fly_3d.py --scenario hand --no-gui --noise none
   .venv/bin/python tools/fly_3d.py --scenario axes                 # window + drone camera view
   .venv/bin/python tools/fly_3d.py --scenario axes --no-gui --repeat 10 --noise webcam
   .venv/bin/python tools/fly_3d.py --scenario far --no-gui
@@ -58,7 +59,7 @@ def run_scripted(args, cfg) -> int:
     for i in range(args.repeat):
         seed = args.seed + i
         gui = not args.no_gui and i == 0
-        sim = Sim3D(cfg=cfg, noise=args.noise, seed=seed, gui=gui,
+        sim = Sim3D(cfg=cfg, noise=args.noise, seed=seed, gui=gui, hand_only=args.scenario == "hand",
                     person=Person(position=(-args.person_distance, 0.0, 0.0)), wind=args.wind)
         keys = {"quit": False, "estop": False}
         show = hud_window(sim, keys) if gui else None
@@ -70,6 +71,10 @@ def run_scripted(args, cfg) -> int:
         summary = sim.summary()
         sim.close()
         ok = all(r["ok"] for r in rows)
+        if args.scenario == "hand":
+            stop = [r for r in sim.records if r["tag"] == "stop" and r["label"] == "palm"]
+            ok &= (bool(stop) and all(not any(r["cmd"]) for r in stop) and summary["landed"]
+                   and sim.records[-1]["mode"] == "LANDED")
         all_ok &= ok
         print(f"== run {i + 1}/{args.repeat} seed {seed} noise {args.noise}: {'all correct' if ok else 'SOME WRONG'}")
         print_table(rows, summary)
@@ -128,7 +133,8 @@ def run_webcam(args, cfg) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--scenario", choices=sorted(SCRIPTS), default="axes")
+    ap.add_argument("--scenario", choices=sorted(SCRIPTS),
+                    help="default: hand (scripted), axes (experimental webcam avatar)")
     ap.add_argument("--webcam", type=int, default=None, help="drive the 3D person from this webcam")
     ap.add_argument("--noise", choices=("none", "webcam", "harsh"), default="webcam")
     ap.add_argument("--repeat", type=int, default=1, help="scripted runs with consecutive seeds")
@@ -136,7 +142,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-gui", action="store_true")
     ap.add_argument("--wind", type=float, default=0.0)
     ap.add_argument("--person-distance", type=float, default=None,
-                    help="person to drone take-off point, m (default: 1.6 for axes and webcam, 3.0 for far)")
+                    help="distance from person to take-off point in metres")
     ap.add_argument("--webcam-distance", type=float, default=0.7, help="you to your webcam, m")
     ap.add_argument("--config", default=None)
     ap.add_argument("--pose-model", default=None)
@@ -144,6 +150,10 @@ def main(argv=None) -> int:
     ap.add_argument("--far-field", choices=("auto", "always", "off"), default="auto")
     ap.add_argument("--conf", type=float, default=0.5)
     args = ap.parse_args(argv)
+    if args.scenario is None:
+        args.scenario = "hand" if args.webcam is None else "axes"
+    if args.webcam is not None and args.scenario == "hand":
+        ap.error("use demo/fly_sim.py --camera INDEX for hand-only RGB input")
     cfg = load_config(args.config)
     if args.person_distance is None:
         args.person_distance = DISTANCE[args.scenario] if args.webcam is None else 1.6

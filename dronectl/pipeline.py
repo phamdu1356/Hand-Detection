@@ -10,7 +10,7 @@ import numpy as np
 from .backends.base import DroneState
 from .body_frame import Frame, fallback_frame, hand_size, palm_center, shoulder_frame, to_body
 from .config import ControlConfig
-from .gestures import GestureFilter, far_gesture, near_gesture
+from .gestures import GestureFilter, HandCommandFilter, far_gesture, hand_command, near_gesture
 from .joystick import Joystick
 from .state_machine import StateMachine
 from .types import ControlOutput, HandObs, Mode, Observation, VelocityCommand
@@ -46,13 +46,14 @@ def _hand_usable(hand: HandObs | None, cfg: ControlConfig) -> bool:
 
 
 class Controller:
-    def __init__(self, cfg: ControlConfig | None = None):
+    def __init__(self, cfg: ControlConfig | None = None, *, hand_only: bool = False):
         self.cfg = cfg or ControlConfig()
+        self.hand_only = hand_only
         self.reset()
 
     def reset(self):
         self.fsm = StateMachine(self.cfg)
-        self.flt = GestureFilter(self.cfg)
+        self.flt = HandCommandFilter(self.cfg) if self.hand_only else GestureFilter(self.cfg)
         self.joy = Joystick(self.cfg)
         self._range = "none"
         self._none_since: float | None = None
@@ -66,28 +67,34 @@ class Controller:
         cfg = self.cfg
         drone = drone or DroneState()
         t = float(obs.t)
+        interrupted = self._last_t is not None and t - self._last_t > cfg.gap_tol_s
         dt = FIRST_DT if self._last_t is None else min(max(t - self._last_t, _MIN_DT), _MAX_DT)
         self._last_t = t
 
         hand = obs.hand if _hand_usable(obs.hand, cfg) else None
         hand_px = hand_size(hand.kps) if hand is not None else None
-        body_frame = shoulder_frame(obs.body, cfg)
+        body_frame = None if self.hand_only else shoulder_frame(obs.body, cfg)
         frame = body_frame
-        if frame is None and hand is not None:
+        if not self.hand_only and frame is None and hand is not None:
             anchored = self.joy.origin is not None and self.joy.origin.kind == "hand_fallback"
             unit_px = self.joy.origin.hs0 if anchored else hand_px
             frame = fallback_frame(cfg.fallback_k * unit_px)
 
-        range_mode = choose_range(cfg, hand is not None, body_frame, hand_px, self._range,
-                                  lock_near=self.fsm.mode is Mode.FOLLOW)
-        self._range = range_mode
-
-        if range_mode == "near":
-            label = near_gesture(hand, cfg)
-        elif range_mode == "far":
-            label = far_gesture(obs.body, body_frame, cfg)
+        if self.hand_only:
+            if interrupted:
+                self.flt.reset()
+            label = hand_command(hand, cfg)
+            range_mode = "none" if label == "none" else "hand"
         else:
-            label = "none"
+            range_mode = choose_range(cfg, hand is not None, body_frame, hand_px, self._range,
+                                      lock_near=self.fsm.mode is Mode.FOLLOW)
+            if range_mode == "near":
+                label = near_gesture(hand, cfg)
+            elif range_mode == "far":
+                label = far_gesture(obs.body, body_frame, cfg)
+            else:
+                label = "none"
+        self._range = range_mode
         self.flt.update(t, label)
 
         if range_mode == "none":
@@ -99,7 +106,8 @@ class Controller:
             none_s = 0.0
 
         prev_mode = self.fsm.mode
-        dec = self.fsm.step(t, range_mode, self.flt, none_s, drone.altitude, drone.landed)
+        dec = self.fsm.step(t, range_mode, self.flt, none_s, drone.altitude, drone.landed,
+                            hand_only=self.hand_only, interrupted=interrupted)
         mode = dec.mode
 
         cmd, dbg = VelocityCommand(), {}

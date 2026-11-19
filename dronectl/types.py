@@ -67,5 +67,5 @@ class ControlOutput:
     mode: Mode
     cmd: VelocityCommand
     action: str | None     # "takeoff" | "land" | None; emitted once per state change
-    range_mode: str        # "near" | "far" | "none"
+    range_mode: str        # "hand" | "near" | "far" | "none"
     debug: dict = field(default_factory=dict)

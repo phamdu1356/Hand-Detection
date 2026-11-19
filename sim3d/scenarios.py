@@ -108,10 +108,18 @@ def far_script() -> Script:
     ])
 
 
-SCRIPTS = {"axes": axes_script, "far": far_script}
+def hand_script() -> Script:
+    steps = [Step(1.6, "like", palm=TAKEOFF_PALM), Step(4.0, "palm", palm=REST_PALM)]
+    for direction, roll in (("right", 90), ("left", -90), ("up", 0), ("down", 180)):
+        steps.extend([Step(1.6, "one", roll_deg=roll, tag=direction),
+                      Step(0.8, "palm", tag="stop")])
+    return Script(steps + [Step(1.5, "ok", roll_deg=0), Step(6.0, "palm")])
+
+
+SCRIPTS = {"hand": hand_script, "axes": axes_script, "far": far_script}
 # person to drone take-off point, m: near control needs the hand close, arm poses need the whole
 # upper body in view from the ground
-DISTANCE = {"axes": 1.6, "far": 3.0}
+DISTANCE = {"hand": 3.0, "axes": 1.6, "far": 3.0}
 FAR_EXPECT = {"point_right": ("point right", "right", +1), "point_up": ("point up", "up", +1)}
 
 CMD_MIN = {"forward": 0.05, "right": 0.05, "up": 0.05, "yaw_right": math.radians(2.0)}
@@ -148,6 +156,9 @@ def evaluate(records, expect) -> list[dict]:
 
 
 def expectations(name: str) -> dict:
+    if name == "hand":
+        return {k: (f"finger points {k}", AXES[k][1], AXES[k][2])
+                for k in ("right", "left", "up", "down")}
     if name == "axes":
         return {k: (v[0], v[1], v[2]) for k, v in AXES.items()}
     if name == "far":

@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r demo/requirements.txt
 
 COPY dronectl/ dronectl/
 COPY sim/ sim/
+COPY sim3d/ sim3d/
 COPY demo/ demo/
 COPY tools/ tools/
 # only the synthetic scenario helpers from tests/ are needed at runtime (fly_sim --synthetic)

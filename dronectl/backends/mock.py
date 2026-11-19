@@ -62,6 +62,11 @@ class MockBackend:
                 self.landed = True
                 self._cmd = VelocityCommand()
                 self.events.append("landed")
+        elif not self.landed:
+            next_altitude = max(0.0, self.altitude + vertical * dt)
+            if dt > 0:
+                vertical = (next_altitude - self.altitude) / dt
+            self.altitude = next_altitude
         if self.landed:
             self.vel[:] = 0.0
             return

@@ -1,8 +1,7 @@
 """Perception for the drone demo: a camera frame in, an Observation out (plan 2.2).
 
-Wraps demo/test_model.py's OptimalFlycamController with always_body_pose=True, so every frame
-gets a person pose (used for the shoulder frame and far-field gestures) as well as the hand.
-Holds no control logic. The overlay only draws what the controller and the state machine report.
+In hand-only mode, the detector uses only the hand model. The optional mixed mode also
+estimates a body pose for the shoulder frame and arm gestures.
 """
 from __future__ import annotations
 
@@ -43,7 +42,7 @@ class Perception:
     """Camera frame -> Observation. Needs the hand pose model; the person model is optional."""
 
     def __init__(self, pose_model_path=None, body_model_path=None, heatmap_model_path=None,
-                 far_field="auto", conf=0.5, base_dir=None):
+                 far_field="auto", conf=0.5, base_dir=None, hand_only=False):
         base_dir = base_dir or os.path.dirname(_HERE)
         self.conf = float(conf)
         self.ctl = OptimalFlycamController(
@@ -53,7 +52,8 @@ class Perception:
             body_pose_model_path=body_model_path,
             heatmap_model_path=heatmap_model_path,
             far_field_mode=far_field,
-            always_body_pose=True,
+            always_body_pose=not hand_only,
+            enable_body_pose=not hand_only,
         )
         if self.ctl.pose_model is None:
             raise RuntimeError("no hand pose model found: pass pose_model_path (hand_pose.pt or .onnx)")

@@ -44,7 +44,7 @@ LOG_COLUMNS = [
     "ex", "ey", "ez", "eyaw",
     "mode", "action", "cmd_forward", "cmd_right", "cmd_up", "cmd_yaw",
     "drone_x", "drone_y", "drone_z", "drone_yaw",
-    "hand_kps_json", "body_kps_json",
+    "hand_kps_json", "body_kps_json", "input_mode",
 ]
 FRAME_DT = 1.0 / 30.0
 
@@ -67,13 +67,14 @@ class SyntheticScenario:
     to the user's right for 2 s, palm (stop), ok (land). Driven by the controller's last mode, so
     it waits for each transition rather than using fixed times."""
 
-    def __init__(self, max_seconds: float = 60.0):
+    def __init__(self, max_seconds: float = 60.0, hand_only=False):
         from tests.synth import Scene
         self.scene = Scene()
         self.max_seconds = max_seconds
         self.t = 0.0
         self.phase = "like"
         self.phase_t = 0.0
+        self.hand_only = hand_only
 
     def next_obs(self, last_out):
         from tests.synth import BodyPose, HandPose, make_observation
@@ -102,8 +103,14 @@ class SyntheticScenario:
             "fist": ("fist", 0.0), "move": ("fist", 0.6), "stop": ("palm", 0.6),
             "neutral_land": ("one", 0.6), "land": ("ok", 0.6),
         }[self.phase]
-        hand = HandPose(gesture=gesture, palm=(palm_x, -0.6), ratio=0.45)
-        obs = make_observation(self.t, self.scene, body=BodyPose(), hand=hand)
+        angle = 0.0
+        if self.hand_only:
+            if self.phase == "move":
+                gesture, angle = "one", math.pi / 2
+            elif gesture == "one":
+                gesture = "palm"
+        hand = HandPose(gesture=gesture, palm=(palm_x, -0.6), ratio=0.45, rot=angle)
+        obs = make_observation(self.t, self.scene, body=None if self.hand_only else BodyPose(), hand=hand)
         self.t += FRAME_DT
         self.phase_t += FRAME_DT
         return obs
@@ -152,20 +159,36 @@ def _xywh(kps):
 
 
 class CameraSource:
-    def __init__(self, index: int, perception):
+    def __init__(self, source, perception):
         import cv2
-        self.cap = cv2.VideoCapture(index)
+        self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
-            raise RuntimeError(f"cannot open camera {index}")
+            raise RuntimeError("cannot open the selected camera or video")
+        self.recorded = isinstance(source, str) and os.path.isfile(source)
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.frame_number = 0
+        self.previous_pts = -1.0
         self.perception = perception
         self.frame = None
 
     def next_obs(self, _last_out):
         ok, frame = self.cap.read()
         if not ok:
+            if self.frame_number == 0 or not self.recorded:
+                raise RuntimeError("camera or video stopped delivering frames")
             return None
         self.frame = frame
-        return self.perception.perceive(frame, time.monotonic())
+        t = time.monotonic()
+        if self.recorded:
+            import cv2
+            t = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+            if not math.isfinite(t) or t <= self.previous_pts:
+                if not math.isfinite(self.fps) or self.fps <= 0:
+                    raise ValueError("recorded video has no usable timestamps or frame rate")
+                t = max(0.0, self.previous_pts + 1 / self.fps)
+            self.previous_pts = t
+        self.frame_number += 1
+        return self.perception.perceive(frame, t)
 
     def close(self):
         self.cap.release()
@@ -209,6 +232,7 @@ def build_row(obs: Observation, out, state, ctl: Controller, cfg, latency_ms: fl
         drone_yaw=float(state.yaw),
         hand_kps_json=kps_json(hand.kps, hand.kps_conf) if hand is not None else "",
         body_kps_json=kps_json(body.kps, body.kps_conf) if body is not None else "",
+        input_mode="hand" if ctl.hand_only else "mixed",
     )
     if hand is not None and out.range_mode != "none":
         frame = frame_s if frame_s is not None else None
@@ -301,10 +325,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--camera", type=int, default=None, help="webcam index")
+    src.add_argument("--video", help="onboard camera recording or OpenCV-compatible video stream URL")
     src.add_argument("--synthetic", action="store_true", help="scripted scenario, no camera")
     src.add_argument("--replay", default=None, help="CSV log to replay")
     ap.add_argument("--backend", choices=("sim", "mock"), default="sim")
     ap.add_argument("--config", default=None, help="YAML file overriding the control constants")
+    ap.add_argument("--input-mode", choices=("hand", "mixed"), help="default: hand, or the recorded mode on replay")
     ap.add_argument("--log", default=None, help="write one CSV row per frame here")
     ap.add_argument("--no-gui", action="store_true", help="no windows (sim and camera HUD)")
     ap.add_argument("--wind", type=float, default=0.0, help="sim gust strength in m/s^2")
@@ -317,25 +343,26 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
-    if args.replay is None and not args.synthetic and args.camera is None:
-        args.camera = 0
-
+    input_mode = args.input_mode or "hand"
     if args.replay is not None:
         source = ReplaySource(args.replay)
+        if args.input_mode is None and source.rows:
+            input_mode = source.rows[0].get("input_mode") or "mixed"
         gui = False
     elif args.synthetic:
-        source = SyntheticScenario()
+        source = SyntheticScenario(hand_only=input_mode == "hand")
         gui = False
     else:
         from perception import Perception
         perception = Perception(pose_model_path=args.pose_model, body_model_path=args.body_model,
                                 heatmap_model_path=args.heatmap_model, far_field=args.far_field,
-                                conf=args.conf)
-        source = CameraSource(args.camera, perception)
+                                conf=args.conf, hand_only=input_mode == "hand")
+        camera = args.camera if args.camera is not None else 0
+        source = CameraSource(args.video or camera, perception)
         gui = not args.no_gui
 
     backend = make_backend(args.backend, gui=(args.backend == "sim" and gui), wind=args.wind, seed=args.seed)
-    ctl = Controller(cfg)
+    ctl = Controller(cfg, hand_only=input_mode == "hand")
     log = CsvLog(args.log) if args.log else None
     keys = {"show_hud": True, "estop": False}
     try:

@@ -1,267 +1,95 @@
-# Dự án Định vị Bàn tay trên Bộ dữ liệu HaGRID Hand Gesture Recognition Image Dataset
+# Điều khiển drone bằng cử chỉ bàn tay
 
-Dự án này xây dựng một mô hình mạng nơ-ron tích chập CNN tùy chỉnh sử dụng TensorFlow/Keras để định vị bàn tay từ hình ảnh đầu vào. Mô hình dự đoán tọa độ hộp giới hạn $[x, y, w, h]$ chuẩn hóa của bàn tay dưới dạng một bài toán hồi quy.
+**Tác giả dự án: phamdu1356**
 
----
+Người dùng đứng đối diện camera RGB gắn trên drone và ra lệnh bằng một bàn tay. Mô hình YOLO Pose tìm 21 điểm khớp tay trong từng khung hình. Bộ điều khiển đọc hình dạng bàn tay và hướng ngón trỏ, xác nhận cử chỉ qua nhiều khung hình rồi gửi lệnh đến drone mô phỏng. Bàn tay có thể đổi vị trí trên ảnh khi camera di chuyển. Tọa độ tâm bàn tay không được dùng để ra lệnh di chuyển trong chế độ mặc định.
 
-## 📌 Tổng quan dự án
+**Phạm vi đã triển khai.** Chương trình nhận ảnh từ thiết bị video, luồng video tương thích OpenCV hoặc tệp ghi hình. Hai đầu ra hiện có là mô phỏng vật lý PyBullet và bộ mô phỏng đơn giản `mock`. Việc điều khiển động cơ trên drone thật còn phụ thuộc mẫu drone, giao thức điều khiển và thử nghiệm với phần cứng.
 
-- **Bài toán:** Hồi quy tọa độ hộp giới hạn bàn tay từ ảnh màu.
-- **Bộ dữ liệu:** HaGRID được thu nhỏ về độ phân giải $224 \times 224$ pixel tại địa chỉ https://github.com/hasty-ai/hagrid
-- **Đầu vào:** Ảnh màu RGB kích thước $224 \times 224 \times 3$.
-- **Đầu ra:** Tọa độ hộp giới hạn $[x, y, w, h]$ chuẩn hóa từ 0 đến 1 chứa bàn tay:
-  - $x, y$: Tọa độ góc trên bên trái của hộp giới hạn.
-  - $w, h$: Chiều rộng và chiều cao của hộp giới hạn.
+## Cử chỉ
 
----
+Hướng trái/phải tính theo người đang đối diện camera. Đầu vào là ảnh gốc, chưa lật gương. Giữ tay trong khung hình cho đến khi màn hình xác nhận trạng thái.
 
-## 📊 Bộ dữ liệu & Tiền xử lý
+| Cử chỉ | Thời điểm | Phản ứng |
+|---|---|---|
+| Giơ ngón cái, các ngón còn lại khép | Khi đang ở mặt đất, giữ khoảng 1 giây | Cất cánh đến độ cao đặt trước, mặc định 1,5 m |
+| Duỗi riêng ngón trỏ, chỉ sang trái, phải, lên hoặc xuống | Khi đang bay tại chỗ, giữ hướng khoảng 0,25 giây | Di chuyển theo hướng chỉ trong khi còn thấy tín hiệu |
+| Xòe bàn tay, thu ngón trỏ hoặc để tay ra khỏi hình | Trong lúc di chuyển theo ngón trỏ | Lệnh vận tốc về 0 ngay tại khung xử lý mất hướng. Drone mô phỏng cần thời gian để hãm |
+| Chụm ngón cái và ngón trỏ thành dấu OK | Khi đang bay tại chỗ, giữ khoảng 1 giây | Hạ cánh |
 
-### 1. Phân bố dữ liệu gốc
-Bộ dữ liệu gồm **65,535 ảnh** phân bố trên **9 lớp cử chỉ tay**:
+Chương trình dùng tỷ lệ thời gian thấy đúng dấu trong cửa sổ xác nhận để chịu được vài khung mất khớp. Khi hình bị gián đoạn quá lâu, thời gian xác nhận bắt đầu lại. Các thông số nằm trong [cấu hình điều khiển](dronectl/config.py).
 
-| Cử chỉ tay | Số lượng ảnh |
-| :--- | :--- |
-| **mute** | 8,016 ảnh |
-| **ok** | 7,754 ảnh |
-| **like** | 7,752 ảnh |
-| **four** | 7,487 ảnh |
-| **fist** | 7,232 ảnh |
-| **call** | 7,021 ảnh |
-| **palm** | 7,003 ảnh |
-| **one** | 6,768 ảnh |
-| **peace_inverted** | 6,502 ảnh |
+## Chạy thử
 
-*Nhận xét:* Số lượng ảnh giữa các lớp khá cân bằng, giúp mô hình không bị thiên lệch trong quá trình huấn luyện.
-
-### 2. Phân chia tập dữ liệu mới
-Dữ liệu sau khi lọc được chia lại một cách ngẫu nhiên sử dụng seed bằng 42 để đảm bảo tính nhất quán:
-- **Tập huấn luyện train.json:** 42,442 ảnh, chiếm khoảng 65 phần trăm.
-- **Tập kiểm định val.json:** 9,794 ảnh, chiếm khoảng 15 phần trăm.
-- **Tập kiểm tra test.json:** 13,058 ảnh, chiếm khoảng 20 phần trăm.
-
-### 3. Tối ưu hóa hiệu năng nạp dữ liệu tf.data Pipeline
-Để tăng tốc tối đa tốc độ nạp dữ liệu lên GPU và tránh hiện tượng nghẽn cổ chai ở CPU, dự án áp dụng các kỹ thuật:
-- **Kích thước lô BATCH_SIZE bằng 32:** Đảm bảo cân bằng giữa tốc độ tính toán GPU và dung lượng bộ nhớ VRAM.
-- **Số lượng luồng NUM_WORKERS bằng 8:** Sử dụng 8 luồng CPU song song để đọc và giải mã ảnh.
-- **Kỹ thuật lưu bộ nhớ đệm cache:** Lưu trữ tạm thời các ảnh đã xử lý để tránh đọc lặp lại ở các chu kỳ sau.
-- **Kỹ thuật trộn shuffle với bộ đệm 1000:** Trộn ngẫu nhiên dữ liệu với bộ đệm 1000 phần tử nhằm hạn chế mô hình học thuộc lòng thứ tự ảnh.
-- **Kỹ thuật prefetch:** Chuẩn bị trước các lô dữ liệu tiếp theo trên CPU trong khi GPU đang xử lý lô hiện tại.
-
----
-
-## 🏗️ Kiến trúc mô hình CNN
-
-Mô hình được xây dựng dạng tuần tự Sequential tối ưu cho bài toán hồi quy định vị:
-
-```mermaid
-graph TD
-    Input["Đầu vào kích thước 224x224x3"] --> Rescaling["Rescaling tỷ lệ 1 chia 255"]
-    Rescaling --> Conv1["Conv2D với 32 bộ lọc kích thước 3x3 + BN + ReLU"]
-    Conv1 --> Pool1["MaxPooling2D kích thước 2x2 với thuộc tính valid"]
-    Pool1 --> Conv2["Conv2D với 64 bộ lọc kích thước 3x3 + BN + ReLU"]
-    Conv2 --> Pool2["MaxPooling2D kích thước 2x2 với thuộc tính valid"]
-    Pool2 --> Conv3["Conv2D với 128 bộ lọc kích thước 3x3 + BN + ReLU"]
-    Conv3 --> Pool3["MaxPooling2D kích thước 2x2 với thuộc tính valid"]
-    Pool3 --> Conv4["Conv2D với 256 bộ lọc kích thước 3x3 + BN + ReLU"]
-    Conv4 --> Pool4["MaxPooling2D kích thước 2x2 với thuộc tính valid"]
-    Pool4 --> Conv5["Conv2D với 512 bộ lọc kích thước 3x3 + BN + ReLU"]
-    Conv5 --> GAP["GlobalAveragePooling2D"]
-    GAP --> Dense1["Dense với 256 đơn vị kích hoạt bằng ReLU"]
-    Dense1 --> Dropout["Dropout tỷ lệ 0.2"]
-    Dropout --> Output["Dense với 4 đơn vị kích hoạt bằng Sigmoid trả về bốn tọa độ x y w h"]
-```
-
-### Các điểm cải tiến nổi bật:
-- **Chuẩn hóa luồng dữ liệu:** Thứ tự Conv2D, BatchNormalization và Activation ReLU giúp phân phối dữ liệu đầu vào của hàm phi tuyến luôn ổn định.
-- **Khởi tạo trọng số chuyên dụng:** Sử dụng bộ khởi tạo he_normal cho tất cả các lớp tích chập giúp ổn định biên độ đạo hàm khi truyền qua các lớp sâu.
-- **Tiết kiệm tài nguyên:** Tắt bias bằng cách đặt thuộc tính use_bias thành False ở tất cả các lớp tích chập đứng trước lớp chuẩn hóa BatchNormalization để giảm tham số thừa.
-- **Thay thế Flatten bằng GlobalAveragePooling2D:** Giảm 99 phần trăm số lượng tham số kết nối tới lớp Dense, chống quá khớp và tăng tốc độ hội tụ.
-- **Lớp đầu ra Sigmoid:** Sử dụng hàm kích hoạt sigmoid cho lớp Dense cuối cùng có 4 neuron để đảm bảo tọa độ đầu ra luôn nằm trong khoảng từ 0 đến 1.
-
----
-
-## ⚙️ Cấu hình huấn luyện
-
-- **Thuật toán tối ưu Optimizer:** Adam với tốc độ học learning_rate bằng 0.0001, hệ số beta_1 bằng 0.9 và clipnorm bằng 1.0 nhằm giới hạn chuẩn L2 của đạo hàm để chống bùng nổ gradient.
-- **Hàm mất mát Loss function:** MSE giúp phạt nặng các sai số lớn để mô hình nhanh chóng khớp khung hộp giới hạn.
-- **Chỉ số đánh giá Metric:** MAE để đo lường trực quan khoảng cách sai số thực tế theo tỷ lệ ảnh.
-- **Cơ chế tự động:**
-  - **EarlyStopping**: Dừng huấn luyện sớm nếu độ mất mát trên tập kiểm định val_loss không cải thiện liên tục sau 10 chu kỳ, đồng thời khôi phục lại trọng số tốt nhất bằng cách thiết lập restore_best_weights thành True.
-  - **ReduceLROnPlateau**: Tự động giảm tốc độ học đi một nửa bằng cách nhân với hệ số 0.5 nếu val_loss không giảm sau 3 chu kỳ liên tiếp.
-
----
-
-## 📈 Kết quả huấn luyện & Đánh giá
-
-Mô hình được huấn luyện trên GPU CUDA và đạt được kết quả ấn tượng sau quá trình tối ưu hóa:
-
-- **Độ mất mát trên tập kiểm tra Test Loss MSE:** 0.0057
-- **Sai số tuyệt đối trung bình trên tập kiểm tra Test MAE:** 0.0490
-
-> 💡 **Ý nghĩa thực tế:** Với Test MAE đạt 0.0490, điều này có nghĩa là các cạnh của hộp giới hạn dự đoán trung bình chỉ bị lệch khoảng 4.9 phần trăm so với kích thước gốc của hình ảnh, tương đương khoảng 11 pixel trên độ phân giải $224 \times 224$.
-
----
-
-## 📂 Cấu trúc thư mục Workspace
-
-Thư mục dự án gồm các thành phần sau:
-- CodeTrain.ipynb: Notebook chứa toàn bộ mã nguồn xử lý, huấn luyện và đánh giá.
-- hand_localization_model.h5: File mô hình đã huấn luyện thành công định dạng TensorFlow Keras.
-- README.md: Tài liệu hướng dẫn dự án.
-
----
-
-## 🛠️ Hướng dẫn cài đặt & Chạy dự án
-
-### 1. Yêu cầu môi trường
-- Hệ điều hành: Windows hoặc Linux
-- Phiên bản Python: 3.10
-- Thư viện yêu cầu:
-  ```bash
-  pip install tensorflow matplotlib pillow
-  ```
-- Khuyến nghị: Cài đặt CUDA và cuDNN tương thích để huấn luyện tăng tốc trên GPU NVIDIA.
-
-### 2. Sử dụng mô hình đã huấn luyện
-Bạn có thể dễ dàng tải và sử dụng mô hình hand_localization_model.h5 để dự đoán Inference trên ảnh mới bằng đoạn mã Python sau:
-
-```python
-import tensorflow as tf
-import numpy as np
-from PIL import Image
-
-model_path = "hand_localization_model.h5"
-model = tf.keras.models.load_model(model_path)
-
-def preprocess_image(image_path):
-    img = Image.open(image_path).convert("RGB")
-    original_size = img.size
-    img_resized = img.resize((224, 224))
-    img_array = np.array(img_resized)
-    img_array = np.expand_dims(img_array, axis=0)
-    return img_array, original_size
-
-img_array, original_size = preprocess_image("path_to_your_image.jpg")
-orig_w, orig_h = original_size
-pred_box = model.predict(img_array)[0]
-
-x = pred_box[0] * orig_w
-y = pred_box[1] * orig_h
-w = pred_box[2] * orig_w
-h = pred_box[3] * orig_h
-
-print(f"Hộp giới hạn bàn tay phát hiện: X={x:.1f}, Y={y:.1f}, W={w:.1f}, H={h:.1f}")
-```
-
----
-
-## Điều khiển drone giả lập
-
-Phần này điều khiển một quadrotor trong PyBullet bằng cử chỉ tay qua webcam. Drone thật chưa được nối vào.
-
-Hệ trục: người dùng đứng ở gốc, nhìn về phía +X. Lệnh vận tốc tính theo hướng nhìn của người dùng: `forward` ra xa, `right` sang phải, `up` lên, `yaw_rate` xoay trái (dương).
-
-### Cài đặt (một lần, dùng `.venv` có sẵn)
+Chạy các lệnh từ thư mục gốc. Dự án đã được thử bằng Python 3.11. Nếu đã có môi trường `.venv` của dự án, kích hoạt nó. Để cài mới:
 
 ```bash
-cd "/home/pham-du/code/học và hành/Hand-Detection"
-.venv/bin/pip install pybullet pytest pyyaml onnxruntime
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r demo/requirements.txt pytest
 ```
 
-Chạy toàn bộ test:
-```bash
-.venv/bin/python -m pytest tests -q
-```
-
-Lái thử drone giả lập bằng bàn phím (W/S tiến lùi, A/D trái phải, ↑/↓ lên xuống, ←/→ xoay, T cất cánh, L hạ cánh, Space dừng):
-```bash
-.venv/bin/python sim/teleop_keyboard.py
-```
-
-Kiểm tra nhanh không cần cửa sổ (khoảng 3 giây mô phỏng):
-```bash
-.venv/bin/python sim/teleop_keyboard.py --smoke
-```
-
-### Chạy bằng tay và webcam
-
-Chỉ in lệnh, không mở sim:
-```bash
-.venv/bin/python demo/fly_sim.py --camera 0 --backend mock
-```
-
-Điều khiển drone giả lập bằng tay, có ghi log (một dòng CSV mỗi khung):
-```bash
-.venv/bin/python demo/fly_sim.py --camera 0 --backend sim --log logs/run1.csv
-```
-
-Phím trong cửa sổ: `q` thoát, `r` đặt lại bộ điều khiển, `Space` dừng khẩn (lệnh bằng 0 và chuyển sang HOVER khi đang bay), `h` ẩn/hiện HUD.
-
-Phát lại một phiên đã ghi, để so sánh khi chỉnh thông số:
-```bash
-.venv/bin/python demo/fly_sim.py --replay logs/run1.csv --backend sim --config my.yaml
-```
-
-Chạy kịch bản tổng hợp (không cần camera, không cần model):
-```bash
-.venv/bin/python demo/fly_sim.py --synthetic --backend mock --no-gui --log logs/synthetic.csv
-```
-
-Kiểm tra log theo các chỉ tiêu M1, M2, M8, M9:
-```bash
-.venv/bin/python tools/check_log.py logs/run1.csv
-```
-
-Kiểm tra hướng 3D bằng model thật, không cần webcam. Script cắt bàn tay thật từ ảnh val, dịch, phóng to và xoay chúng như người dùng đưa tay trước webcam, rồi chạy qua cả chuỗi nhận diện, bộ điều khiển và sim. Kết quả là bảng xem mỗi trục (phải/trái, lên/xuống, tiến/lùi, xoay) có đi đúng hướng không. Script chạy hai cảnh: nền trống (không thấy vai) và ảnh có người thật (thấy vai):
-```bash
-.venv/bin/python tools/test_3d_real.py --pose-model hand_pose.pt --body-model yolo11n-pose.pt \
-    --val ../datasets/hand-keypoints/images/val
-```
-
-Quy ước: ảnh webcam dùng nguyên bản, không lật gương. Người dùng đứng đối diện camera, nên bên phải của họ nằm ở bên trái ảnh. Mọi lệnh "phải/trái" đều tính theo người dùng.
-
-### Giả lập 3D: người ảo và camera gắn trên drone
-
-`tools/fly_3d.py` dựng một người 3D có khớp (thân, tay, 21 khớp bàn tay) đứng trước drone. Camera gắn trên drone, có gimbal nghiêng tự động, quay người đó. Mỗi khung, khớp 3D được chiếu qua camera drone, thêm nhiễu giống webcam (rung khớp, mất tay theo từng đợt, nắm tay bị đọc thành like, trễ 2 khung), rồi đưa vào bộ điều khiển thật. Khi drone bay hoặc xoay, hình người trong camera thay đổi theo. Đây là vòng kín mà webcam laptop không mô phỏng được.
-
-Chạy kịch bản có cửa sổ 3D (người, drone, vệt bay màu xanh, tia camera màu vàng) và cửa sổ "drone camera" (thứ bộ điều khiển nhìn thấy):
-```bash
-.venv/bin/python tools/fly_3d.py --scenario axes
-```
-
-Chạy nhiều lần không mở cửa sổ để đo độ ổn định. Mức nhiễu chọn trong `none`, `webcam`, `harsh`:
-```bash
-.venv/bin/python tools/fly_3d.py --scenario axes --no-gui --repeat 10 --noise webcam
-```
-
-Kịch bản `far`: người đứng cách 3 m, giơ hai tay để cất cánh, chỉ tay để bay, dang tay để dừng, giơ hai tay để hạ cánh:
-```bash
-.venv/bin/python tools/fly_3d.py --scenario far
-```
-
-Dùng webcam điều khiển người ảo: các khớp đọc được từ bạn sẽ làm người 3D cử động, và drone phản ứng theo những gì camera của nó thấy. `--webcam-distance` là khoảng cách từ bạn tới webcam, tính bằng mét:
-```bash
-.venv/bin/python tools/fly_3d.py --webcam 0 --pose-model hand_pose.pt --body-model yolo11n-pose.pt
-```
-
-Phím trong cửa sổ "drone camera": `q` thoát, `space` dừng khẩn cấp.
-
-Chỉnh thông số: sao chép `dronectl/config.py` thành YAML (ví dụ `my.yaml`), giữ những khóa cần đổi, rồi truyền bằng `--config my.yaml`. Khóa lạ sẽ bị báo lỗi.
-
-### Bằng Docker (CPU, chậm hơn bản `.venv`)
-
-Đặt `hand_pose.pt` (hoặc `.onnx`) và `yolo11n-pose.pt` vào `demo/models/`. File model không có trong image.
+**Thử nhanh từ đầu đến cuối, không cần camera hay tệp mô hình.** Kịch bản tổng hợp ra hiệu cất cánh, dịch sang phải, dừng và hạ cánh. Lệnh thứ hai kiểm tra các lệnh tính lại có trùng với bản ghi hay không.
 
 ```bash
-xhost +local:docker
-cd demo && docker compose build fly
-cd demo && docker compose run --rm fly --backend sim --camera 0 --pose-model /app/models/hand_pose.pt --body-model /app/models/yolo11n-pose.pt
+python demo/fly_sim.py --synthetic --backend mock --no-gui --log logs/hand.csv
+python demo/fly_sim.py --replay logs/hand.csv --backend mock --no-gui
 ```
 
-Thử không cần camera và không cần model:
+**Chạy mô phỏng camera gắn cố định trên drone.** Các điểm khớp 3D của bàn tay được chiếu qua camera ở vị trí thực tế của drone mô phỏng sau mỗi bước bay. Kịch bản kiểm tra bốn hướng, dừng và hạ cánh. Tọa độ khớp trong phép thử này được sinh từ hình học. Bỏ `--no-gui` để xem mô phỏng.
+
 ```bash
-cd demo && docker compose run --rm fly --backend mock --synthetic --no-gui
+python tools/fly_3d.py --scenario hand --noise none --no-gui
+python tools/fly_3d.py --scenario hand --noise webcam --seed 500 --repeat 30 --no-gui
 ```
 
-Trạng thái: chưa chạy với webcam thật. Chỉ tiêu độ trễ và FPS (M8) cần đo trên webcam của bạn.
+**Chạy nhận diện trên ảnh RGB.** Đặt `hand_pose.pt` hoặc `hand_pose.onnx` trong thư mục gốc, hoặc truyền đường dẫn bằng `--pose-model`. Mặc định chỉ cần mô hình bàn tay. Với tệp đã ghi, bộ lọc dùng thời gian của video để một cử chỉ giữ 1 giây có cùng ý nghĩa khi máy xử lý nhanh hoặc chậm.
+
+```bash
+python demo/fly_sim.py --video ban_ghi_tu_drone.mp4 --backend sim --no-gui --log logs/flight.csv
+python demo/fly_sim.py --camera 0 --backend sim
+```
+
+Nếu drone xuất luồng video, truyền địa chỉ luồng vào `--video`. Với thiết bị USB, thay `0` bằng số thứ tự thiết bị. Khi mở cửa sổ, nhấn `q` để thoát và `Space` để yêu cầu dừng. Cách đặt mô hình khi dùng Docker nằm trong [hướng dẫn mô hình](demo/models/README.md).
+
+## Huấn luyện và đánh giá
+
+Bộ **Hand Keypoints** cung cấp nhãn khung bao và 21 điểm khớp. Các nhãn này dùng để huấn luyện mô hình tư thế tay. Danh sách lệnh bay và cách xác nhận cử chỉ nằm trong bộ điều khiển. Notebook [huấn luyện trên Colab](train_hand_pose_colab.ipynb) và [notebook thí nghiệm ban đầu](CodeTrain.ipynb) lưu các bước huấn luyện trước đây.
+
+Thử nghiệm tinh chỉnh cục bộ dùng cùng một trọng số khởi đầu, bốn epoch, ảnh 640 px và seed 42. Trong 2.048 ảnh train và 256 ảnh validation được chọn, trình nạp bỏ qua 52 và 6 ảnh có nhãn lỗi. Hai bản mô hình được chấm trên cùng **512 ảnh khác** thuộc tập validation gốc và tách riêng cho lần tinh chỉnh này.
+
+| Mô hình | mAP50–95 khung bàn tay | mAP50–95 các khớp |
+|---|---:|---:|
+| Mô hình đang dùng | 77,46% | **67,74%** |
+| Sau tinh chỉnh 4 epoch | **87,08%** | 67,65% |
+
+Bản mặc định vẫn là `hand_pose.pt` vì việc đọc cử chỉ dựa vào các khớp. Mức chênh 0,09 điểm phần trăm chưa cho thấy bản mới cải thiện phần này. Có thể thử riêng trọng số mới tại `runs/hand_only_trial/fit/weights/best.pt`. Để lặp lại phép so sánh, dùng một thư mục kết quả mới:
+
+```bash
+python tools/finetune_hand.py --data ../datasets/hand-keypoints --weights hand_pose.pt --output runs/hand_trial_02
+```
+
+## Kiểm chứng
+
+- **Camera di chuyển, tay đứng yên.** Bài kiểm thử chiếu cùng bàn tay xòe hoặc nắm qua 91 vị trí và góc camera liên tiếp cho mỗi tư thế. Tâm tay dịch hơn 50 pixel trên ảnh. Bộ điều khiển giữ trạng thái bay tại chỗ, lệnh vận tốc bằng 0 trong toàn bộ phép thử.
+- **Video qua mô hình thật.** Một clip 268 khung được dựng từ các ảnh tay đã chọn để kiểm tra đường truyền dữ liệu. Hệ thống phát lệnh cất cánh, bay lên theo ngón trỏ, dừng và hạ cánh. Khi phát lại log, cả 268 khung cho cùng lệnh. Clip này là thử nghiệm tích hợp có chủ đích. Độ chính xác theo ý định người dùng cần được đo trên các phiên video độc lập.
+- **Mô phỏng ở 3 m.** Kịch bản không nhiễu hoàn thành đủ bốn hướng bay và hạ cánh. Với nhiễu kiểu webcam, **25/30 lượt** hoàn thành (seed 500–529). Ba lượt bỏ lỡ cử chỉ cất cánh, một lượt dịch phải quá ít, một lượt chưa hạ cánh khi kịch bản kết thúc. Đây là kết quả trên khớp tay mô phỏng. Cự ly và độ chính xác trên camera drone thật vẫn cần được đo.
+- **Thử nghiệm 10 m trước đây.** [Báo cáo](demo/benchmark_report.md) dùng các ảnh ghép và có cấu hình định vị cổ tay bằng mô hình người. Số liệu trong báo cáo thuộc bài đo đó. Chế độ chỉ dùng bàn tay cần được đánh giá riêng ở từng cự ly.
+
+```bash
+python -m pytest tests -q
+```
+
+## Mã nguồn
+
+| Thành phần | Vai trò |
+|---|---|
+| [demo/fly_sim.py](demo/fly_sim.py) và [demo/perception.py](demo/perception.py) | Đọc camera hoặc video, nhận diện, ghi và phát lại log |
+| [dronectl](dronectl/) | Đọc cử chỉ, xác nhận lệnh theo thời gian và quản lý trạng thái bay |
+| [sim3d](sim3d/) và [sim](sim/) | Camera, bàn tay 3D và mô phỏng chuyển động của drone |
+| [tests](tests/) | Kiểm thử nhận diện, mất tín hiệu, chuyển trạng thái và hướng di chuyển |
+| [tools/finetune_hand.py](tools/finetune_hand.py) | Tinh chỉnh mô hình khớp tay và so sánh hai bản trọng số |
+
+Để đối chiếu log từ bản cũ, `--replay` tự đọc chế độ đã ghi. Log đời đầu được phát bằng chế độ kết hợp tay và cơ thể. Có thể chọn lại chế độ thử nghiệm cũ bằng `--input-mode mixed`.
+
+Dữ liệu và phần mềm nền được dẫn riêng tại [Hand Keypoints của Ultralytics](https://docs.ultralytics.com/datasets/pose/hand-keypoints/), [HaGRID](https://github.com/hukenovs/hagrid) và [PyBullet](https://github.com/bulletphysics/bullet3).
