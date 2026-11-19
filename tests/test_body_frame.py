@@ -16,6 +16,7 @@ from dronectl.body_frame import (
 )
 from dronectl.config import ControlConfig
 from dronectl.hand_rules import _is_valid_kp
+from dronectl.types import BodyObs
 from tests.synth import BodyPose, HandPose, Scene, hand_points, make_observation
 
 PALM_BODY = (0.1, -0.6)
@@ -71,15 +72,30 @@ def test_hand_size_stable_under_40_degree_roll_about_palm_axis():
 
 # ---------------------------------------------------------------- shoulder frame
 
-def test_shoulder_frame_axes_are_orthonormal_and_point_right_and_up():
+def test_shoulder_frame_axes_are_orthonormal_and_point_to_users_right_and_up():
     obs = make_observation(0.0, Scene(), body=BodyPose())
     frame = shoulder_frame(obs.body)
     assert frame.kind == "shoulder"
     assert frame.scale == pytest.approx(160.0)
     assert np.dot(frame.ex, frame.ey) == pytest.approx(0.0, abs=1e-12)
     assert np.linalg.norm(frame.ex) == pytest.approx(1.0)
-    assert frame.ex[0] > 0.99          # image right
+    assert frame.ex[0] < -0.99         # the user's right is the image left on a raw camera
     assert frame.ey[1] < -0.99         # up is smaller v on screen
+
+
+def test_shoulder_frame_matches_a_real_coco_person_facing_the_camera():
+    # yolo11n-pose on ultralytics' zidane.jpg: left shoulder (COCO 5) at u=1048, right (6) at u=854
+    kps = np.zeros((17, 2))
+    kps[5], kps[6] = (1048.0, 300.0), (854.0, 300.0)
+    body = BodyObs(kps=kps, kps_conf=np.full(17, 0.9), box=(800.0, 200.0, 300.0, 500.0))
+    frame = shoulder_frame(body)
+    above_right_hand = to_body(frame, (854.0, 150.0))   # above the user's right shoulder
+    assert above_right_hand[0] > 0.4 and above_right_hand[1] > 0.7
+
+
+def test_fallback_frame_uses_the_same_orientation_as_the_shoulder_frame():
+    frame = fallback_frame(10.0)
+    assert np.allclose(frame.ex, (-1.0, 0.0)) and np.allclose(frame.ey, (0.0, -1.0))
 
 
 def test_shoulder_frame_is_none_when_shoulder_conf_is_low():
@@ -190,7 +206,7 @@ def test_fallback_ratio_is_one_over_k_at_anchor_time():
 
 def test_image_frame_is_identity_scale():
     frame = image_frame()
-    assert np.allclose(to_body(frame, (3.0, 4.0)), (3.0, -4.0))
+    assert np.allclose(to_body(frame, (3.0, 4.0)), (-3.0, -4.0))   # user's right = image left
 
 
 def test_is_valid_kp_rules():

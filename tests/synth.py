@@ -1,9 +1,10 @@
 """Synthetic keypoints for the tests.
 
-Body keypoints are built in body units: x points to the image right, y points up, and
+Body keypoints are built in body units: x points to the user's right, y points up, and
 1 unit is the shoulder width. Hand keypoints are built in hand units: the wrist is at the
-origin and the middle-finger MCP is at (0, 1). ``Scene`` maps both into pixels, where u
-points right and v points down. Tilt is a clockwise roll on screen, in radians.
+origin and the middle-finger MCP is at (0, 1). ``Scene`` maps both into pixels of a raw
+(not mirrored) camera facing the user: u points right, v points down, and the user's right
+is on the image left. Tilt is a clockwise roll on screen, in radians.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class Scene:
     frame_wh: tuple = (1280, 720)
 
     def body_to_px(self, p) -> np.ndarray:
-        v = np.array([p[0], -p[1]], dtype=float) * self.shoulder_px
+        v = np.array([-p[0], -p[1]], dtype=float) * self.shoulder_px   # user's right -> image left
         return rot(self.tilt) @ v + np.asarray(self.center, dtype=float)
 
 
@@ -39,7 +40,7 @@ _POINT_DEG = {"right": 0.0, "up": 90.0, "left": 180.0, "down": -90.0}
 
 
 def arm_points(side: int, kind: str) -> tuple[np.ndarray, np.ndarray]:
-    """Elbow and wrist in body units. side = -1 for the image-left arm, +1 for the image-right arm.
+    """Elbow and wrist in body units. side = -1 for the user's left arm, +1 for the user's right arm.
 
     kind: "down", "up" (arm raised above the head), "t" (arm straight out sideways),
     or "point_<dir>" / "point_<degrees>" (arm straight in that direction, body frame).
@@ -62,8 +63,8 @@ def arm_points(side: int, kind: str) -> tuple[np.ndarray, np.ndarray]:
 
 @dataclass
 class BodyPose:
-    left: str = "down"      # arm on the image-left side (COCO 5, 7, 9)
-    right: str = "down"     # arm on the image-right side (COCO 6, 8, 10)
+    left: str = "down"      # the user's left arm (COCO 5, 7, 9), seen on the image right
+    right: str = "down"     # the user's right arm (COCO 6, 8, 10), seen on the image left
     conf: float = 0.9
     drop: tuple = ()        # COCO indices whose confidence is set to 0
 
@@ -143,12 +144,21 @@ def hand_px(gesture: str, target_px, length_px: float, angle: float) -> np.ndarr
     return (local - centre) @ rot(angle).T * length_px + np.asarray(target_px, dtype=float)
 
 
+def hand_body(hand: "HandPose") -> np.ndarray:
+    """Hand keypoints in body units. hand.rot turns the hand clockwise as the user sees it."""
+    local = hand_points(hand.gesture)
+    centre = local[_PALM_IDX].mean(axis=0)
+    c, s = math.cos(hand.rot), math.sin(hand.rot)
+    cw = np.array([[c, s], [-s, c]])            # clockwise in y-up coordinates
+    return (local - centre) @ cw.T * hand.ratio + np.asarray(hand.palm, dtype=float)
+
+
 @dataclass
 class HandPose:
     gesture: str = "palm"
     palm: tuple = (0.0, -0.6)   # palm centre in body units (shoulder midpoint = origin)
     ratio: float = 0.45         # hand length / shoulder width
-    rot: float = 0.0            # extra clockwise rotation, radians
+    rot: float = 0.0            # clockwise rotation as the user sees it, radians
     conf: float = 0.9
 
 
@@ -176,8 +186,7 @@ def make_observation(t: float, scene: Scene, body: BodyPose | None = None,
         body_obs = BodyObs(kps=pts, kps_conf=conf, box=_box(pts))
     hand_obs = None
     if hand is not None:
-        pts = hand_px(hand.gesture, scene.body_to_px(hand.palm),
-                      hand.ratio * scene.shoulder_px, scene.tilt + hand.rot)
+        pts = np.array([scene.body_to_px(p) for p in hand_body(hand)])
         if noise_px > 0:
             pts = pts + rng.normal(0.0, noise_px, pts.shape)
         hand_obs = HandObs(kps=pts, kps_conf=np.full(21, hand.conf), box=_box(pts), conf=hand.conf)

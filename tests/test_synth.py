@@ -32,7 +32,7 @@ def test_tilt_rolls_the_person_but_keeps_shoulder_width():
     kp = body_points(BodyPose())
     scene = Scene(shoulder_px=160.0, tilt=math.radians(15))
     px = np.array([scene.body_to_px(p) for p in kp])
-    d = px[6] - px[5]
+    d = px[5] - px[6]                   # image-left shoulder (user's right) -> image-right one
     assert np.linalg.norm(d) == pytest.approx(160.0)
     assert _angle_deg(d) == pytest.approx(15.0)
 
