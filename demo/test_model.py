@@ -373,11 +373,29 @@ def _load_heatmap_session(model_path):
     return session, meta
 
 
-def select_main_person(person_boxes, body_kpts, hand_center=None):
-    """Index of the main person: the one whose wrist is nearest the hand, else the largest box."""
+def _box_iou(a, b):
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def select_main_person(person_boxes, body_kpts, hand_center=None, prev_box=None, keep_iou=0.3):
+    """Index of the main person.
+
+    The person chosen on the previous frame (prev_box, x1 y1 x2 y2) is kept while a box still
+    overlaps it by keep_iou, so the body frame does not jump to a bystander mid-flight.
+    Otherwise: the person whose wrist is nearest the hand, else the largest box.
+    """
     boxes = np.asarray(person_boxes, dtype=float).reshape(-1, 4)
     if len(boxes) == 0:
         return None
+    if prev_box is not None:
+        ious = [_box_iou(b, prev_box) for b in boxes]
+        best = int(np.argmax(ious))
+        if ious[best] >= keep_iou:
+            return best
     if hand_center is not None:
         best, best_d = None, None
         for i, kp in enumerate(body_kpts):
@@ -432,6 +450,7 @@ class OptimalFlycamController:
         self.use_temporal_roi = bool(use_temporal_roi)
         self.always_body_pose = bool(always_body_pose)
         self._body_cache = None  # (frame, result) of the last body-pose run
+        self._main_person_box = None  # x1 y1 x2 y2 of the person followed on the last frame
 
         self.wrist_history = deque(maxlen=10)
         self.gesture_window = deque(maxlen=5)
@@ -687,9 +706,11 @@ class OptimalFlycamController:
         if self._body_cache is None or self._body_cache[0] is not frame or self._body_cache[1] is None:
             return empty
         boxes, confs, kpts, kconf = self._body_cache[1]
-        idx = select_main_person(boxes, kpts, hand_center)
+        idx = select_main_person(boxes, kpts, hand_center, prev_box=self._main_person_box)
         if idx is None:
+            self._main_person_box = None
             return empty
+        self._main_person_box = np.asarray(boxes[idx][:4], dtype=float)
         x1, y1, x2, y2 = (float(v) for v in boxes[idx][:4])
         kc = np.asarray(kconf[idx], dtype=float) if kconf is not None else np.ones(len(kpts[idx]))
         return {

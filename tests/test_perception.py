@@ -73,6 +73,22 @@ def test_select_main_person_prefers_person_whose_wrist_is_near_hand():
     assert tm.select_main_person(boxes, kpts, hand_center) == 0
 
 
+def test_select_main_person_keeps_the_previous_person_while_visible():
+    boxes = [[0, 0, 100, 200], [300, 0, 400, 200]]
+    kpts = np.stack([_person_kpts(10, 10), _person_kpts(310, 10)])
+    kpts[0][tm.COCO_RIGHT_WRIST] = (90.0, 100.0)      # bystander's wrist is now nearer the hand
+    hand_center = (95.0, 100.0)
+    prev = np.array([305.0, 5.0, 405.0, 205.0])      # followed person, moved a little
+    assert tm.select_main_person(boxes, kpts, hand_center, prev_box=prev) == 1
+
+
+def test_select_main_person_reselects_when_the_previous_person_is_gone():
+    boxes = [[0, 0, 100, 200]]
+    kpts = np.stack([_person_kpts(10, 10)])
+    prev = np.array([300.0, 0.0, 400.0, 200.0])
+    assert tm.select_main_person(boxes, kpts, None, prev_box=prev) == 0
+
+
 def test_select_main_person_none_when_empty():
     assert tm.select_main_person(np.zeros((0, 4)), np.zeros((0, 17, 2)), None) is None
 
