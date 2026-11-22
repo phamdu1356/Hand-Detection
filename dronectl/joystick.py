@@ -21,6 +21,8 @@ FORWARD, RIGHT, UP, YAW = 0, 1, 2, 3
 
 @dataclass
 class Origin:
+    """Hand pose captured when FOLLOW starts; joystick errors are measured against it."""
+
     kind: str       # frame kind the origin was measured in
     x0: float       # body x of the palm centre
     y0: float       # body y of the palm centre
@@ -39,6 +41,7 @@ def shape(e: float, dead: float, alpha: float) -> float:
 
 
 def wrap_angle(a: float) -> float:
+    """Wrap an angle in radians to [-pi, pi)."""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
@@ -51,11 +54,14 @@ def rate_limit(prev: float, target: float, dt: float, accel: float, decel: float
 
 
 class Joystick:
+    """Turns hand motion relative to a stored origin into a smoothed VelocityCommand."""
+
     def __init__(self, cfg: ControlConfig | None = None):
         self.cfg = cfg or ControlConfig()
         self.reset()
 
     def reset(self):
+        """Forget the origin and clear all smoothing and rate-limit state."""
         self.origin = None
         self._ema = np.zeros(4)
         self._out = np.zeros(4)
