@@ -157,6 +157,17 @@ def test_wrap_angle_range():
     assert wrap_angle(0.1) == pytest.approx(0.1)
 
 
+def test_wrap_angle_half_open_interval():
+    """Result lies in [-pi, pi): +pi maps to -pi, in-range angles are unchanged."""
+    assert wrap_angle(math.pi) == pytest.approx(-math.pi)
+    assert wrap_angle(-math.pi) == pytest.approx(-math.pi)
+    assert wrap_angle(0.0) == 0.0
+    for a in np.linspace(-20.0, 20.0, 81):
+        w = wrap_angle(a)
+        assert -math.pi <= w < math.pi
+        assert wrap_angle(w) == pytest.approx(w)
+
+
 def test_error_without_origin_is_none():
     joy = Joystick()
     assert joy.raw_error(*_pose()) is None
