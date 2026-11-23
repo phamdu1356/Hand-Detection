@@ -10,7 +10,7 @@ from typing import Protocol
 
 import numpy as np
 
-from ..types import VelocityCommand
+from ..types import ControlOutput, VelocityCommand
 
 
 @dataclass
@@ -27,6 +27,8 @@ class DroneBackend(Protocol):
 
     def land(self) -> None: ...
 
+    def hover(self) -> None: ...
+
     def send_velocity(self, cmd: VelocityCommand) -> None: ...
 
     def step(self, dt: float) -> None: ...
@@ -34,3 +36,14 @@ class DroneBackend(Protocol):
     def state(self) -> DroneState: ...
 
     def close(self) -> None: ...
+
+
+def apply_control(backend: DroneBackend, out: ControlOutput, takeoff_altitude: float = 1.5) -> None:
+    """Dispatch one ControlOutput (takeoff / land / hover action and velocity) to a backend."""
+    if out.action == "takeoff":
+        backend.takeoff(takeoff_altitude)
+    elif out.action == "land":
+        backend.land()
+    elif out.action == "hover":
+        backend.hover()
+    backend.send_velocity(out.cmd)

@@ -65,8 +65,9 @@ def _flying():
     """Return a Sim in HOVER, by taking off with like and waiting for the altitude."""
     sim = Sim()
     sim.hold("like", "near", 1.2)
-    sim.settle(10.0)
+    sim.hold("none", "near", 4.0)
     assert sim.fsm.mode is Mode.HOVER
+    assert sim.altitude >= 1.4
     return sim
 
 
@@ -95,7 +96,19 @@ def test_row1_palm_cancels_landing():
     assert sim.fsm.mode is Mode.LANDING
     sim.hold("palm", "near", 0.2)
     assert sim.fsm.mode is Mode.HOVER
-    assert [a for _, a in sim.actions] == ["takeoff", "land"]
+    assert [a for _, a in sim.actions] == ["takeoff", "land", "hover"]
+
+
+def test_emergency_hover_aborts_flying_and_ignores_landed():
+    sim = Sim()
+    d = sim.fsm.emergency_hover(0.0, airborne=False)
+    assert d.mode is Mode.LANDED and d.action is None
+
+    sim = _flying()
+    sim.hold("ok", "near", 1.2)
+    assert sim.fsm.mode is Mode.LANDING
+    d = sim.fsm.emergency_hover(sim.t, airborne=True)
+    assert d.mode is Mode.HOVER and d.action == "hover" and d.changed is True
 
 
 def test_row1_t_pose_held_0_2s_stops_in_far_range():

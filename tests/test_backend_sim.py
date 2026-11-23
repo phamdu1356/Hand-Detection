@@ -5,6 +5,7 @@ Covers the plan section 10.3 scenario (M2 braking, M6 hover stillness and the ri
 import numpy as np
 import pytest
 
+from dronectl.backends.base import apply_control
 from dronectl.backends.pybullet_sim import PyBulletSimBackend
 from dronectl.config import ControlConfig
 from dronectl.pipeline import Controller
@@ -27,14 +28,10 @@ class Runner:
         self.outs = []
         self.right_max = 0.0
 
-    def frame(self, hand, body=BODY, noise_px=0.0, rng=None):
+    def frame(self, hand, body=BODY, noise_px=0.0, rng=None, estop=False):
         obs = make_observation(self.t, self.scene, body=body, hand=hand, noise_px=noise_px, rng=rng)
-        out = self.ctl.update(obs, self.drone.state())
-        if out.action == "takeoff":
-            self.drone.takeoff(self.cfg.takeoff_altitude)
-        elif out.action == "land":
-            self.drone.land()
-        self.drone.send_velocity(out.cmd)
+        out = self.ctl.update(obs, self.drone.state(), estop=estop)
+        apply_control(self.drone, out, self.cfg.takeoff_altitude)
         self.drone.step(DT)
         self.right_max = max(self.right_max, -float(self.drone.state().pos[1]))
         self.outs.append(out)
@@ -125,3 +122,17 @@ def test_still_hand_in_follow_drifts_under_0p2m_in_10s(runner):
     assert r.ctl.mode is Mode.FOLLOW
     drift = float(np.linalg.norm(r.drone.state().pos[:2] - p0[:2]))
     assert drift <= 0.2, f"drift {drift:.3f} m in 10 s"
+
+
+def test_palm_cancels_landing_mid_air_on_pybullet(runner):
+    r = runner
+    _takeoff_and_hover(r)
+    r.until(lambda s: s.ctl.mode is Mode.LANDING, _hand("ok"))
+    r.run(1.0, NEUTRAL)
+    assert r.ctl.mode is Mode.LANDING
+    r.run(0.2, _hand("palm"))
+    assert r.ctl.mode is Mode.HOVER
+    r.run(2.5, NEUTRAL)
+    st = r.drone.state()
+    assert not st.landed and st.altitude > 0.5
+    assert r.ctl.mode is Mode.HOVER

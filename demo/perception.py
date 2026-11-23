@@ -52,6 +52,7 @@ class Perception:
             body_pose_model_path=body_model_path,
             heatmap_model_path=heatmap_model_path,
             far_field_mode=far_field,
+            enable_tile_fallback=(not hand_only or far_field == "always"),
             always_body_pose=not hand_only,
             enable_body_pose=not hand_only,
         )
@@ -59,11 +60,10 @@ class Perception:
             raise RuntimeError("no hand pose model found: pass pose_model_path (hand_pose.pt or .onnx)")
 
     def perceive(self, frame, t: float | None = None) -> Observation:
-        """Run the detectors on a copy of ``frame`` and return what they found."""
+        """Run pure inference on ``frame`` (without mutating or drawing on it) and return an Observation."""
         t0 = time.perf_counter()
         h, w = frame.shape[:2]
-        self.ctl.process_frame(frame.copy(), conf_thres=self.conf)
-        res = self.ctl.last_result or {}
+        res = self.ctl.detect_frame(frame, conf_thres=self.conf) or {}
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
         hand = None

@@ -132,6 +132,19 @@ def test_land_sets_landed_flag(hovering):
     assert st.altitude < 0.05
 
 
+def test_hover_aborts_landing_and_holds_altitude(hovering):
+    hovering.land()
+    _run(hovering, 1.0)
+    mid_alt = hovering.state().altitude
+    assert 0.5 < mid_alt < 1.35
+    hovering.hover()
+    _run(hovering, 2.0)
+    st = hovering.state()
+    assert not st.landed
+    assert st.altitude > 0.5
+    assert float(np.linalg.norm(st.vel)) < 0.15
+
+
 def test_key_mapping_matches_user_frame():
     from sim.teleop_keyboard import A, D, DOWN, LEFT, RIGHT, SPACE, UP, W, key_command
 

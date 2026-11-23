@@ -71,3 +71,17 @@ def test_mock_tracks_vertical_hand_commands():
     backend.send_velocity(VelocityCommand(up=-0.25))
     backend.step(1.0)
     assert backend.state().pos[2] == pytest.approx(1.75)
+
+
+def test_hand_joystick_synthetic_and_replay_with_velocity_columns(tmp_path):
+    log = tmp_path / "joy.csv"
+    assert fly_sim.main([
+        "--synthetic", "--input-mode", "hand_joystick",
+        "--backend", "mock", "--no-gui", "--log", str(log),
+    ]) == 0
+    rows = list(csv.DictReader(open(log, newline="", encoding="utf-8")))
+    assert all(r["input_mode"] == "hand_joystick" and r["body_present"] == "0" for r in rows)
+    assert all(k in rows[0] for k in ("drone_vx", "drone_vy", "drone_vz"))
+    assert "FOLLOW" in [r["mode"] for r in rows] and rows[-1]["mode"] == "LANDED"
+    assert any(float(r["cmd_right"]) > 0 for r in rows)
+    assert fly_sim.main(["--replay", str(log), "--backend", "mock", "--no-gui"]) == 0

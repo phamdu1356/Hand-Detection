@@ -134,6 +134,22 @@ class Joystick:
             raise ValueError(f"unknown direction: {direction!r}")
         return t
 
+    def hand_joystick_target(self, err) -> np.ndarray:
+        """Four-direction dominant-axis target for hand-only joystick mode (Interface B).
+
+        Uses the same target speed cap (v_far) as POINT_MOVE; forward and yaw stay zero.
+        """
+        ex, ey, _, _ = err
+        c = self.cfg
+        dz_xy = c.dead_xy / c.full_xy
+        t = np.zeros(4)
+        if abs(ex) >= abs(ey):
+            t[RIGHT] = shape(ex, dz_xy, c.expo_alpha) * c.v_far
+        else:
+            t[UP] = shape(ey, dz_xy, c.expo_alpha) * c.v_far
+        self.last_target = t
+        return self.last_target.copy()
+
     def step(self, target, dt: float) -> VelocityCommand:
         """EMA, acceleration limits, then the horizontal speed cap. Call once per frame."""
         c = self.cfg

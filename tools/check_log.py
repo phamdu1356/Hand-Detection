@@ -19,6 +19,11 @@ import math
 import sys
 
 MOVING = ("FOLLOW", "POINT_MOVE")
+REQUIRED_COLUMNS = (
+    "t", "mode", "range_mode", "latency_ms",
+    "cmd_forward", "cmd_right", "cmd_up", "cmd_yaw",
+    "drone_x", "drone_y", "drone_z",
+)
 BRAKE_SPEED = 0.1      # m/s
 M2_P95 = 0.5           # s
 M8_MEDIAN_MS = 50.0
@@ -27,9 +32,27 @@ M8_MIN_FPS = 25.0
 M9_MAX_PER_10S = 1
 
 
-def load(path: str) -> list[dict]:
+def load_with_header(path: str) -> tuple[list[str], list[dict]]:
     with open(path, newline="", encoding="utf-8") as fh:
-        return list(csv.DictReader(fh))
+        reader = csv.DictReader(fh)
+        return list(reader.fieldnames or []), list(reader)
+
+
+def load(path: str) -> list[dict]:
+    _, rows = load_with_header(path)
+    return rows
+
+
+def validate_schema(rows: list[dict], fieldnames: list[str] | None = None) -> list[str]:
+    """Return a list of schema/completeness errors (empty list means valid)."""
+    errors = []
+    cols = set(fieldnames) if fieldnames is not None else (set(rows[0].keys()) if rows else set())
+    missing = [c for c in REQUIRED_COLUMNS if c not in cols]
+    if missing:
+        errors.append(f"missing required columns: {missing}")
+    if not rows:
+        errors.append("log contains no data rows")
+    return errors
 
 
 def _f(row, key, default=0.0):
@@ -57,18 +80,27 @@ def m1_violations(rows) -> list[int]:
     return bad
 
 
+def _row_has_vel(row) -> bool:
+    return all(row.get(k) not in (None, "") for k in ("drone_vx", "drone_vy", "drone_vz"))
+
+
 def m2_brake_times(rows) -> list[float]:
     """Seconds from each move-to-HOVER transition to the first frame with speed < 0.1 m/s."""
     times = []
     speeds = []
-    for i in range(1, len(rows)):
-        dt = _f(rows[i], "t") - _f(rows[i - 1], "t")
-        if dt <= 0:
-            speeds.append(math.nan)
-            continue
-        d = [_f(rows[i], k) - _f(rows[i - 1], k) for k in ("drone_x", "drone_y", "drone_z")]
-        speeds.append(math.sqrt(sum(x * x for x in d)) / dt)
-    speeds = [0.0] + speeds
+    for i, r in enumerate(rows):
+        if _row_has_vel(r):
+            v = [_f(r, k) for k in ("drone_vx", "drone_vy", "drone_vz")]
+            speeds.append(math.sqrt(sum(x * x for x in v)))
+        elif i == 0:
+            speeds.append(0.0)
+        else:
+            dt = _f(r, "t") - _f(rows[i - 1], "t")
+            if dt <= 0:
+                speeds.append(math.nan)
+                continue
+            d = [_f(r, k) - _f(rows[i - 1], k) for k in ("drone_x", "drone_y", "drone_z")]
+            speeds.append(math.sqrt(sum(x * x for x in d)) / dt)
     for i in range(1, len(rows)):
         if rows[i - 1]["mode"] in MOVING and rows[i]["mode"] == "HOVER":
             t0 = _f(rows[i], "t")
@@ -127,7 +159,12 @@ def main(argv=None) -> int:
     if len(argv) != 1:
         print(__doc__)
         return 2
-    rows = load(argv[0])
+    fieldnames, rows = load_with_header(argv[0])
+    schema_errors = validate_schema(rows, fieldnames)
+    if schema_errors:
+        for err in schema_errors:
+            print(f"SCHEMA FAIL: {err}")
+        return 1
     res = analyze(rows)
     failed = False
     m1 = res["M1"]

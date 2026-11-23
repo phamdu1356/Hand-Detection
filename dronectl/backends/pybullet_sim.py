@@ -24,6 +24,9 @@ class PyBulletSimBackend:
     def land(self) -> None:
         self._sim.land()
 
+    def hover(self) -> None:
+        self._sim.hover()
+
     def send_velocity(self, cmd: VelocityCommand) -> None:
         self._sim.set_velocity(cmd.forward, cmd.right, cmd.up, cmd.yaw_rate)
 

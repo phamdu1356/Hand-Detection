@@ -122,6 +122,39 @@ def test_body_fields_empty_without_body_run_on_this_frame():
     assert fields == {"body_keypoints": None, "body_kpt_conf": None, "person_box": None}
 
 
+def test_detect_frame_does_not_mutate_frame_or_run_legacy_state(monkeypatch):
+    import cv2
+
+    ctl = _controller_without_weights()
+    fake_hand_kps = np.tile(np.array([[100.0, 120.0]], dtype=np.float32), (21, 1))
+    fake_hand_kps[9] = (100.0, 80.0)
+    ctl.pose_model = object()
+    monkeypatch.setattr(ctl, "_detect_hand_pose", lambda *a, **kw: {
+        "box": (80.0, 60.0, 50.0, 70.0),
+        "keypoints": fake_hand_kps,
+        "kpt_conf": np.full(21, 0.9, dtype=np.float32),
+        "conf": 0.92,
+        "stage": "full_frame",
+        "roi": None,
+        "rois_checked": 0,
+    })
+
+    def _forbid(*_args, **_kwargs):
+        raise AssertionError("detect_frame must not draw with OpenCV")
+
+    monkeypatch.setattr(cv2, "line", _forbid)
+    monkeypatch.setattr(cv2, "circle", _forbid)
+    monkeypatch.setattr(cv2, "rectangle", _forbid)
+    monkeypatch.setattr(cv2, "putText", _forbid)
+
+    frame = np.full((240, 320, 3), 77, np.uint8)
+    before = frame.copy()
+    res = ctl.detect_frame(frame, conf_thres=0.5)
+    assert res["detected"] is True
+    assert np.array_equal(frame, before)
+    assert len(ctl.wrist_history) == 0 and len(ctl.gesture_window) == 0
+
+
 @pytest.mark.skipif(not (os.path.exists(HAND_POSE) and os.path.exists(BODY_POSE)),
                     reason="hand_pose.pt or yolo11n-pose.pt not present")
 def test_real_models_on_generated_image_share_one_body_run():

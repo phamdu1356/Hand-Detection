@@ -940,6 +940,78 @@ class OptimalFlycamController:
             "crop_roi": (ox, oy, csize),
         }
 
+    def detect_frame(self, frame, conf_thres=0.5, far_field=None):
+        """Pure inference path without drawing or legacy control state (used by demo/perception.py).
+
+        Does not modify ``frame``. Returns a structured dict with hand/body keypoints and metadata.
+        """
+        t0 = time.perf_counter()
+        if self.always_body_pose:
+            self._run_body_pose(frame)
+
+        if self.pose_model is None:
+            res = {
+                "detected": False, "box": None, "raw_box": None,
+                "keypoints": None, "kpt_conf": None, "conf": 0.0,
+                "raw_gesture": "none", "stage": "none", "roi": None,
+                "rois_checked": 0, "used_heatmap": False, "heatmap_latency_ms": 0.0,
+                "latency_ms": (time.perf_counter() - t0) * 1000.0,
+            }
+            res.update(self._body_fields(frame, None))
+            self.last_result = res
+            return res
+
+        det = self._detect_hand_pose(frame, conf_thres=conf_thres, far_field=far_field)
+        if det is None:
+            res = {
+                "detected": False, "box": None, "raw_box": None,
+                "keypoints": None, "kpt_conf": None, "conf": 0.0,
+                "raw_gesture": "none", "stage": "none", "roi": None,
+                "rois_checked": 0, "used_heatmap": False, "heatmap_latency_ms": 0.0,
+                "latency_ms": (time.perf_counter() - t0) * 1000.0,
+            }
+            res.update(self._body_fields(frame, None))
+            self.last_result = res
+            return res
+
+        raw_box = det["box"]
+        kps = det["keypoints"]
+        used_heatmap = False
+        heatmap_latency_ms = 0.0
+        hm_gesture = None
+        if self.heatmap_session is not None:
+            hm_res = self._refine_with_heatmap(frame, raw_box)
+            if hm_res is not None:
+                kps = hm_res["keypoints"]
+                used_heatmap = True
+                heatmap_latency_ms = hm_res["latency_ms"]
+                hm_gesture = hm_res["gesture"]
+
+        if _is_valid_kp(kps[0]) and _is_valid_kp(kps[9]):
+            hand_center = ((float(kps[0][0]) + float(kps[9][0])) / 2.0,
+                           (float(kps[0][1]) + float(kps[9][1])) / 2.0)
+        else:
+            hand_center = (raw_box[0] + raw_box[2] / 2.0, raw_box[1] + raw_box[3] / 2.0)
+
+        res = {
+            "detected": True,
+            "box": raw_box,
+            "raw_box": raw_box,
+            "keypoints": kps,
+            "kpt_conf": det.get("kpt_conf"),
+            "conf": det["conf"],
+            "raw_gesture": hm_gesture if (used_heatmap and hm_gesture is not None) else "none",
+            "stage": det.get("stage", "full_frame"),
+            "roi": det.get("roi"),
+            "rois_checked": det.get("rois_checked", 0),
+            "used_heatmap": used_heatmap,
+            "heatmap_latency_ms": heatmap_latency_ms,
+            "latency_ms": (time.perf_counter() - t0) * 1000.0,
+        }
+        res.update(self._body_fields(frame, hand_center))
+        self.last_result = res
+        return res
+
     def process_frame(self, frame, conf_thres=0.5, far_field=None):
         t0 = time.perf_counter()
         h_img, w_img = frame.shape[:2]

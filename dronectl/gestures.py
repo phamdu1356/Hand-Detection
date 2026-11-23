@@ -201,7 +201,12 @@ class HandCommandFilter(GestureFilter):
     def update(self, t: float, raw: str):
         super().update(t, raw)
         self.samples.append((t, raw))
-        horizon = max(self.cfg.takeoff_hold_near_s, self.cfg.land_hold_near_s, self.cfg.finger_hold_s)
+        horizon = max(
+            self.cfg.takeoff_hold_near_s,
+            self.cfg.land_hold_near_s,
+            self.cfg.finger_hold_s,
+            self.cfg.follow_hold_s,
+        )
         while len(self.samples) > 1 and self.samples[1][0] <= t - horizon:
             self.samples.popleft()
 

@@ -79,3 +79,22 @@ def test_main_exit_codes(tmp_path):
         w.writeheader()
         w.writerows(rows)
     assert check_log.main([str(bad)]) == 1
+
+
+def test_schema_rejects_header_only_and_missing_columns(tmp_path):
+    empty = tmp_path / "header_only.csv"
+    empty.write_text("t,mode,range_mode,latency_ms,cmd_forward,cmd_right,cmd_up,cmd_yaw,drone_x,drone_y,drone_z\n")
+    assert check_log.main([str(empty)]) == 1
+
+    missing = tmp_path / "missing_cols.csv"
+    missing.write_text("t,mode\n0.0,HOVER\n")
+    assert check_log.main([str(missing)]) == 1
+
+
+def test_m2_uses_logged_velocity_columns_when_present():
+    rows = [
+        {**_row(0.0, mode="FOLLOW"), "drone_vx": "0.0", "drone_vy": "-0.5", "drone_vz": "0.0"},
+        {**_row(0.1, mode="HOVER"), "drone_vx": "0.0", "drone_vy": "-0.2", "drone_vz": "0.0"},
+        {**_row(0.2, mode="HOVER"), "drone_vx": "0.0", "drone_vy": "-0.05", "drone_vz": "0.0"},
+    ]
+    assert check_log.m2_brake_times(rows) == [pytest.approx(0.1)]

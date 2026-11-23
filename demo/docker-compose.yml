@@ -3,9 +3,11 @@ services:
     build:
       context: ..
       dockerfile: demo/Dockerfile
+    entrypoint: ["python", "demo/test_model.py"]
     volumes:
       # thư mục ảnh để thử: đặt ảnh vào demo/images
       - ./images:/app/images
+      - ./models:/app/models:ro
       - /tmp/.X11-unix:/tmp/.X11-unix
     environment:
       - DISPLAY=${DISPLAY:-:0}

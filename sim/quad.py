@@ -182,6 +182,12 @@ class QuadSim:
         if self._mode in ("takeoff", "flying"):
             self._mode = "landing"
 
+    def hover(self) -> None:
+        """Abort takeoff or landing and hold in place with zero commanded velocity."""
+        if self._mode in ("takeoff", "flying", "landing"):
+            self._mode = "flying"
+            self._cmd[:] = 0.0
+
     def set_velocity(self, forward: float, right: float, up: float, yaw_rate: float) -> None:
         """Set the user-frame velocity command: m/s forward/right/up and rad/s yaw (CCW)."""
         self._cmd[:] = (float(forward), float(right), float(up), float(yaw_rate))

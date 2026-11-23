@@ -30,10 +30,11 @@ for _p in (_REPO_ROOT, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from dronectl.backends.base import apply_control  # noqa: E402
 from dronectl.backends.mock import MockBackend  # noqa: E402
 from dronectl.body_frame import hand_angle, hand_shoulder_ratio, shoulder_frame  # noqa: E402
 from dronectl.config import load_config  # noqa: E402
-from dronectl.pipeline import Controller  # noqa: E402
+from dronectl.pipeline import INPUT_MODES, Controller  # noqa: E402
 from dronectl.types import BodyObs, FLYING_MODES, HandObs, Mode, Observation  # noqa: E402
 
 LOG_COLUMNS = [
@@ -44,6 +45,7 @@ LOG_COLUMNS = [
     "ex", "ey", "ez", "eyaw",
     "mode", "action", "cmd_forward", "cmd_right", "cmd_up", "cmd_yaw",
     "drone_x", "drone_y", "drone_z", "drone_yaw",
+    "drone_vx", "drone_vy", "drone_vz",
     "hand_kps_json", "body_kps_json", "input_mode",
 ]
 FRAME_DT = 1.0 / 30.0
@@ -67,17 +69,18 @@ class SyntheticScenario:
     to the user's right for 2 s, palm (stop), ok (land). Driven by the controller's last mode, so
     it waits for each transition rather than using fixed times."""
 
-    def __init__(self, max_seconds: float = 60.0, hand_only=False):
-        from tests.synth import Scene
+    def __init__(self, max_seconds: float = 60.0, hand_only=False, input_mode: str | None = None):
+        from sim3d.synth import Scene
         self.scene = Scene()
         self.max_seconds = max_seconds
         self.t = 0.0
         self.phase = "like"
         self.phase_t = 0.0
-        self.hand_only = hand_only
+        self.input_mode = input_mode if input_mode is not None else ("hand" if hand_only else "mixed")
+        self.hand_only = self.input_mode in ("hand", "hand_joystick")
 
     def next_obs(self, last_out):
-        from tests.synth import BodyPose, HandPose, make_observation
+        from sim3d.synth import BodyPose, HandPose, make_observation
         if self.t >= self.max_seconds:
             return None
         mode = last_out.mode if last_out is not None else Mode.LANDED
@@ -104,10 +107,13 @@ class SyntheticScenario:
             "neutral_land": ("one", 0.6), "land": ("ok", 0.6),
         }[self.phase]
         angle = 0.0
-        if self.hand_only:
+        if self.input_mode == "hand":
             if self.phase == "move":
                 gesture, angle = "one", math.pi / 2
             elif gesture == "one":
+                gesture = "palm"
+        elif self.input_mode == "hand_joystick":
+            if gesture == "one":
                 gesture = "palm"
         hand = HandPose(gesture=gesture, palm=(palm_x, -0.6), ratio=0.45, rot=angle)
         obs = make_observation(self.t, self.scene, body=None if self.hand_only else BodyPose(), hand=hand)
@@ -230,9 +236,10 @@ def build_row(obs: Observation, out, state, ctl: Controller, cfg, latency_ms: fl
         cmd_forward=out.cmd.forward, cmd_right=out.cmd.right, cmd_up=out.cmd.up, cmd_yaw=out.cmd.yaw_rate,
         drone_x=float(state.pos[0]), drone_y=float(state.pos[1]), drone_z=float(state.pos[2]),
         drone_yaw=float(state.yaw),
+        drone_vx=float(state.vel[0]), drone_vy=float(state.vel[1]), drone_vz=float(state.vel[2]),
         hand_kps_json=kps_json(hand.kps, hand.kps_conf) if hand is not None else "",
         body_kps_json=kps_json(body.kps, body.kps_conf) if body is not None else "",
-        input_mode="hand" if ctl.hand_only else "mixed",
+        input_mode=ctl.input_mode,
     )
     if hand is not None and out.range_mode != "none":
         frame = frame_s if frame_s is not None else None
@@ -281,16 +288,8 @@ def run(source, backend, ctl: Controller, cfg, log=None, hud=None, emergency=Non
         t0 = time.perf_counter()
         state = backend.state()
         stop_now = bool(emergency and emergency())
-        if stop_now and state.altitude > 0.05 and not state.landed:
-            ctl.fsm.mode = Mode.HOVER
-        out = ctl.update(obs, state)
-        if out.action == "takeoff":
-            backend.takeoff(cfg.takeoff_altitude)
-        elif out.action == "land":
-            backend.land()
-        if stop_now:
-            out.cmd = type(out.cmd)()
-        backend.send_velocity(out.cmd)
+        out = ctl.update(obs, state, estop=stop_now)
+        apply_control(backend, out, cfg.takeoff_altitude)
         dt = FRAME_DT if prev_t is None else min(max(obs.t - prev_t, 1e-3), 0.2)
         prev_t = obs.t
         backend.step(dt)
@@ -330,7 +329,7 @@ def main(argv=None) -> int:
     src.add_argument("--replay", default=None, help="CSV log to replay")
     ap.add_argument("--backend", choices=("sim", "mock"), default="sim")
     ap.add_argument("--config", default=None, help="YAML file overriding the control constants")
-    ap.add_argument("--input-mode", choices=("hand", "mixed"), help="default: hand, or the recorded mode on replay")
+    ap.add_argument("--input-mode", choices=INPUT_MODES, help="default: hand, or the recorded mode on replay")
     ap.add_argument("--log", default=None, help="write one CSV row per frame here")
     ap.add_argument("--no-gui", action="store_true", help="no windows (sim and camera HUD)")
     ap.add_argument("--wind", type=float, default=0.0, help="sim gust strength in m/s^2")
@@ -350,19 +349,19 @@ def main(argv=None) -> int:
             input_mode = source.rows[0].get("input_mode") or "mixed"
         gui = False
     elif args.synthetic:
-        source = SyntheticScenario(hand_only=input_mode == "hand")
+        source = SyntheticScenario(input_mode=input_mode)
         gui = False
     else:
         from perception import Perception
         perception = Perception(pose_model_path=args.pose_model, body_model_path=args.body_model,
                                 heatmap_model_path=args.heatmap_model, far_field=args.far_field,
-                                conf=args.conf, hand_only=input_mode == "hand")
+                                conf=args.conf, hand_only=input_mode in ("hand", "hand_joystick"))
         camera = args.camera if args.camera is not None else 0
         source = CameraSource(args.video or camera, perception)
         gui = not args.no_gui
 
     backend = make_backend(args.backend, gui=(args.backend == "sim" and gui), wind=args.wind, seed=args.seed)
-    ctl = Controller(cfg, hand_only=input_mode == "hand")
+    ctl = Controller(cfg, input_mode=input_mode)
     log = CsvLog(args.log) if args.log else None
     keys = {"show_hud": True, "estop": False}
     try:

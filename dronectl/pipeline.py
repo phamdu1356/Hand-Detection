@@ -17,6 +17,7 @@ from .types import ControlOutput, HandObs, Mode, Observation, VelocityCommand
 
 FIRST_DT = 1.0 / 30.0
 _MIN_DT, _MAX_DT = 1e-3, 0.2
+INPUT_MODES = ("hand", "hand_joystick", "mixed")
 
 
 def choose_range(cfg: ControlConfig, hand_ok: bool, body_frame: Frame | None,
@@ -46,9 +47,19 @@ def _hand_usable(hand: HandObs | None, cfg: ControlConfig) -> bool:
 
 
 class Controller:
-    def __init__(self, cfg: ControlConfig | None = None, *, hand_only: bool = False):
+    def __init__(self, cfg: ControlConfig | None = None, *, hand_only: bool = False,
+                 input_mode: str | None = None):
+        if input_mode is None:
+            resolved = "hand" if hand_only else "mixed"
+        else:
+            if input_mode not in INPUT_MODES:
+                raise ValueError(f"input_mode must be one of {INPUT_MODES}, got {input_mode!r}")
+            if hand_only and input_mode == "mixed":
+                raise ValueError("hand_only=True conflicts with input_mode='mixed'")
+            resolved = input_mode
         self.cfg = cfg or ControlConfig()
-        self.hand_only = hand_only
+        self.input_mode = resolved
+        self.hand_only = resolved in ("hand", "hand_joystick")
         self.reset()
 
     def reset(self):
@@ -63,7 +74,7 @@ class Controller:
     def mode(self) -> Mode:
         return self.fsm.mode
 
-    def update(self, obs: Observation, drone: DroneState | None = None) -> ControlOutput:
+    def update(self, obs: Observation, drone: DroneState | None = None, *, estop: bool = False) -> ControlOutput:
         cfg = self.cfg
         drone = drone or DroneState()
         t = float(obs.t)
@@ -75,10 +86,15 @@ class Controller:
         hand_px = hand_size(hand.kps) if hand is not None else None
         body_frame = None if self.hand_only else shoulder_frame(obs.body, cfg)
         frame = body_frame
-        if not self.hand_only and frame is None and hand is not None:
-            anchored = self.joy.origin is not None and self.joy.origin.kind == "hand_fallback"
-            unit_px = self.joy.origin.hs0 if anchored else hand_px
-            frame = fallback_frame(cfg.fallback_k * unit_px)
+        if frame is None and hand is not None:
+            if self.input_mode == "hand_joystick":
+                anchored = self.joy.origin is not None and self.joy.origin.kind == "hand_fallback"
+                unit_px = self.joy.origin.hs0 if anchored else hand_px
+                frame = fallback_frame(unit_px)
+            elif not self.hand_only:
+                anchored = self.joy.origin is not None and self.joy.origin.kind == "hand_fallback"
+                unit_px = self.joy.origin.hs0 if anchored else hand_px
+                frame = fallback_frame(cfg.fallback_k * unit_px)
 
         if self.hand_only:
             if interrupted:
@@ -106,21 +122,31 @@ class Controller:
             none_s = 0.0
 
         prev_mode = self.fsm.mode
-        dec = self.fsm.step(t, range_mode, self.flt, none_s, drone.altitude, drone.landed,
-                            hand_only=self.hand_only, interrupted=interrupted)
-        mode = dec.mode
-
-        cmd, dbg = VelocityCommand(), {}
-        if mode is Mode.FOLLOW:
-            cmd, dbg = self._follow(prev_mode, frame, hand, dt)
-        elif mode is Mode.POINT_MOVE:
-            if prev_mode is not Mode.POINT_MOVE:
-                self.joy.reset()
-            cmd = self.joy.step(self.joy.point_target(self.fsm.point_dir), dt)
-            dbg["point"] = self.fsm.point_dir
+        if estop:
+            dec = self.fsm.emergency_hover(t, airborne=drone.altitude > 0.05 and not drone.landed)
+            self.joy.reset()
+            if label != "none":
+                self.flt.latch(label)
+            mode = dec.mode
+            cmd, dbg = VelocityCommand(), {"estop": True}
         else:
-            if prev_mode is Mode.FOLLOW or prev_mode is Mode.POINT_MOVE or self.joy.origin is not None:
-                self.joy.reset()
+            dec = self.fsm.step(t, range_mode, self.flt, none_s, drone.altitude, drone.landed,
+                                input_mode=self.input_mode, interrupted=interrupted)
+            mode = dec.mode
+            if self.input_mode == "hand_joystick" and prev_mode is Mode.FOLLOW and mode is not Mode.FOLLOW:
+                self.flt.reset()
+
+            cmd, dbg = VelocityCommand(), {}
+            if mode is Mode.FOLLOW:
+                cmd, dbg = self._follow(prev_mode, frame, hand, dt)
+            elif mode is Mode.POINT_MOVE:
+                if prev_mode is not Mode.POINT_MOVE:
+                    self.joy.reset()
+                cmd = self.joy.step(self.joy.point_target(self.fsm.point_dir), dt)
+                dbg["point"] = self.fsm.point_dir
+            else:
+                if prev_mode is Mode.FOLLOW or prev_mode is Mode.POINT_MOVE or self.joy.origin is not None:
+                    self.joy.reset()
 
         debug = {
             "frame": frame.kind if frame is not None else None,
@@ -161,6 +187,9 @@ class Controller:
             # after follow_lost_s
             dbg["held"] = True
             return self.joy.step(self.joy.last_target, dt), dbg
+        if self.input_mode == "hand_joystick":
+            dbg["err"] = (float(err[0]), float(err[1]), 0.0, 0.0)
+            return self.joy.step(self.joy.hand_joystick_target(err), dt), dbg
         err = self.joy.smooth_error(err)
         dbg["err"] = tuple(float(v) for v in err)
         return self.joy.step(self.joy.targets(err), dt), dbg

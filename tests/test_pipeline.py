@@ -7,6 +7,7 @@ import pytest
 from dronectl.config import ControlConfig
 from dronectl.pipeline import Controller, choose_range
 from dronectl.types import FLYING_MODES, MOVING_MODES, Mode
+from dronectl.backends.base import apply_control
 from dronectl.backends.mock import MockBackend
 from tests.synth import BodyPose, HandPose, Scene, make_observation
 
@@ -18,22 +19,18 @@ DEFAULT_BODY = BodyPose()
 class Runner:
     """Feeds synthetic frames to the controller and applies its outputs to the mock drone."""
 
-    def __init__(self, cfg=None, scene=None):
+    def __init__(self, cfg=None, scene=None, input_mode=None):
         self.cfg = cfg or ControlConfig()
-        self.ctl = Controller(self.cfg)
+        self.ctl = Controller(self.cfg, input_mode=input_mode)
         self.mock = MockBackend()
         self.scene = scene or Scene()
         self.t = 0.0
         self.outs = []
 
-    def frame(self, body, hand):
+    def frame(self, body, hand, estop=False):
         obs = make_observation(self.t, self.scene, body=body, hand=hand)
-        out = self.ctl.update(obs, self.mock.state())
-        if out.action == "takeoff":
-            self.mock.takeoff(self.cfg.takeoff_altitude)
-        elif out.action == "land":
-            self.mock.land()
-        self.mock.send_velocity(out.cmd)
+        out = self.ctl.update(obs, self.mock.state(), estop=estop)
+        apply_control(self.mock, out, self.cfg.takeoff_altitude)
         self.mock.step(DT)
         self.outs.append(out)
         self.t += DT
@@ -348,3 +345,54 @@ def test_controller_accepts_missing_drone_state():
 
 def test_moving_modes_are_subset_of_flying_modes():
     assert MOVING_MODES <= FLYING_MODES
+
+
+def test_palm_cancels_landing_on_mock_backend_without_desync():
+    r = Runner()
+    r.run(1.2, DEFAULT_BODY, _const(HandPose("like")))
+    r.wait_until(lambda s: s.ctl.mode is Mode.HOVER, DEFAULT_BODY, HandPose("one"))
+    r.run(1.2, DEFAULT_BODY, _const(HandPose("ok")))
+    assert r.ctl.mode is Mode.LANDING
+    r.run(1.0, DEFAULT_BODY, _const(HandPose("one")))
+    r.run(0.2, DEFAULT_BODY, _const(HandPose("palm")))
+    assert r.ctl.mode is Mode.HOVER
+    r.run(5.0, DEFAULT_BODY, _const(HandPose("one")))
+    assert not r.mock.landed and r.mock.altitude > 0.5
+    assert r.actions() == ["takeoff", "land", "hover"]
+
+
+def test_estop_halts_follow_and_latches_held_gesture():
+    r = _following_runner()
+    r.run(0.8, DEFAULT_BODY, _const(HandPose("fist", palm=(0.5, -0.6))))
+    assert r.outs[-1].cmd.right > 0.2
+    out = r.frame(DEFAULT_BODY, HandPose("fist", palm=(0.5, -0.6)), estop=True)
+    assert out.mode is Mode.HOVER and out.action == "hover" and out.cmd.is_zero()
+    # Continuing to hold the same fist must NOT immediately re-enter FOLLOW
+    for _ in range(15):
+        nxt = r.frame(DEFAULT_BODY, HandPose("fist", palm=(0.5, -0.6)))
+        assert nxt.mode is Mode.HOVER and nxt.cmd.is_zero()
+
+
+def test_hand_joystick_mode_dominant_axis_and_immediate_stop():
+    r = Runner(input_mode="hand_joystick")
+    r.run(1.2, DEFAULT_BODY, _const(HandPose("like")))
+    r.wait_until(lambda s: s.ctl.mode is Mode.HOVER, None, HandPose("palm"))
+    # Pointing with index finger does NOT trigger POINT_MOVE in hand_joystick mode
+    r.run(0.6, None, _const(HandPose("one")))
+    assert r.ctl.mode is Mode.HOVER and r.outs[-1].cmd.is_zero()
+    # Hold fist -> anchor in hand-only palm-normalized frame
+    r.run(0.4, None, _const(HandPose("fist", palm=(0.0, -0.6), ratio=0.45)))
+    assert r.ctl.mode is Mode.FOLLOW
+    assert r.outs[-1].debug["frame"] == "hand_fallback"
+    # Move diagonally (dominant right, smaller up, bigger ratio): only right moves, capped at v_far
+    r.run(1.0, None, _const(HandPose("fist", palm=(0.5, -0.5), ratio=0.65)))
+    cmd = r.outs[-1].cmd
+    assert 0.1 < cmd.right <= r.cfg.v_far + 1e-6
+    assert cmd.up == 0.0 and cmd.forward == 0.0 and cmd.yaw_rate == 0.0
+    # Single dropped frame immediately stops FOLLOW and clears anchor
+    drop_out = r.frame(None, None)
+    assert drop_out.mode is Mode.HOVER and drop_out.cmd.is_zero()
+    assert r.ctl.joy.origin is None
+    # Returning fist on next single frame must NOT instantly move (requires fresh hold to re-anchor)
+    ret_out = r.frame(None, HandPose("fist", palm=(0.5, -0.5), ratio=0.65))
+    assert ret_out.mode is Mode.HOVER and ret_out.cmd.is_zero()

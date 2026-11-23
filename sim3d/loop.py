@@ -6,9 +6,10 @@ from dataclasses import replace
 
 import numpy as np
 
+from dronectl.backends.base import apply_control
 from dronectl.config import ControlConfig
 from dronectl.pipeline import Controller
-from dronectl.types import Mode, VelocityCommand
+from dronectl.types import Mode
 
 from .camera import DroneCamera
 from .noise import WebcamNoise
@@ -21,14 +22,15 @@ AIM_BELOW = 0.15     # the gimbal aims this far below the shoulders, where the h
 class Sim3D:
     def __init__(self, cfg: ControlConfig | None = None, noise="webcam", seed: int = 0,
                  gui: bool = False, person: Person | None = None, camera: DroneCamera | None = None,
-                 wind: float = 0.0, fps: float = FPS, hand_only: bool = False):
+                 wind: float = 0.0, fps: float = FPS, hand_only: bool = False,
+                 input_mode: str | None = None):
         from dronectl.backends.pybullet_sim import PyBulletSimBackend
 
         self.cfg = cfg or ControlConfig()
-        self.ctl = Controller(self.cfg, hand_only=hand_only)
+        self.ctl = Controller(self.cfg, hand_only=hand_only, input_mode=input_mode)
         self.noise = noise if isinstance(noise, WebcamNoise) else WebcamNoise(noise, seed)
         self.person = person or Person()
-        self.camera = camera or (DroneCamera(gimbal=False, pitch_up_deg=6.0) if hand_only else DroneCamera())
+        self.camera = camera or (DroneCamera(gimbal=False, pitch_up_deg=6.0) if self.ctl.hand_only else DroneCamera())
         self.backend = PyBulletSimBackend(gui=gui, wind=wind, seed=seed)
         self.dt = 1.0 / fps
         self.t = 0.0
@@ -59,17 +61,9 @@ class Sim3D:
         if hand_w is not None:
             h_uv, _, h_vis = cam.project(hand_w, st.pos, st.yaw)
         obs = self.noise.observe(self.t, (cam.width, cam.height), b_uv, b_vis, h_uv, h_vis)
-        if estop and st.altitude > 0.05 and not st.landed:
-            self.ctl.fsm.mode = Mode.HOVER          # same as demo/fly_sim.py
-        out = self.ctl.update(obs, st)
-        if estop:
-            out.cmd = VelocityCommand()
+        out = self.ctl.update(obs, st, estop=estop)
         self.last_obs, self.last_out = obs, out
-        if out.action == "takeoff":
-            self.backend.takeoff(self.cfg.takeoff_altitude)
-        elif out.action == "land":
-            self.backend.land()
-        self.backend.send_velocity(out.cmd)
+        apply_control(self.backend, out, self.cfg.takeoff_altitude)
         self.backend.step(self.dt)
         after = self.backend.state()
         torso = self.person.shoulder_mid

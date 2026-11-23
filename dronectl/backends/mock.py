@@ -40,6 +40,12 @@ class MockBackend:
         if not self.landed:
             self._mode = "descend"
 
+    def hover(self) -> None:
+        if not self.landed:
+            self._mode = "hover"
+            self._cmd = VelocityCommand()
+            self.events.append("hover")
+
     def send_velocity(self, cmd: VelocityCommand) -> None:
         if self.landed and not cmd.is_zero():
             self.ground_commands += 1
