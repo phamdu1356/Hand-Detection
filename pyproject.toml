@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hand-detection-dronectl"
+version = "0.1.0"
+description = "Hand-gesture drone control layer, PyBullet 3D simulator and RGB perception demo."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+sim = ["pybullet>=3.2.6"]
+vision = [
+    "opencv-python>=4.10",
+    "ultralytics>=8.3.0",
+    "onnxruntime>=1.17.0",
+]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["benchmark*", "dronectl*", "sim", "sim.*", "sim3d*", "tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

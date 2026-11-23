@@ -9,6 +9,8 @@ __pycache__/
 demo/__pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+build/
 
 # Pretrained / intermediate model weights (keep trained hand_pose.pt, hand_pose.onnx, hand_kpts_heatmap.onnx trackable)
 yolo11*.pt

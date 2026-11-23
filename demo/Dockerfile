@@ -21,8 +21,6 @@ COPY sim/ sim/
 COPY sim3d/ sim3d/
 COPY demo/ demo/
 COPY tools/ tools/
-# only the synthetic scenario helpers from tests/ are needed at runtime (fly_sim --synthetic)
-COPY tests/synth.py tests/synth.py
 
 ENV PYTHONUNBUFFERED=1
 ENTRYPOINT ["python", "demo/fly_sim.py"]
