@@ -69,6 +69,37 @@ Bản mặc định vẫn là `hand_pose.pt` vì việc đọc cử chỉ dựa 
 python tools/finetune_hand.py --data ../datasets/hand-keypoints --weights hand_pose.pt --output runs/hand_trial_02
 ```
 
+### Benchmark Tầng 1 — Phát hiện tay, 21 khớp, cổng `Gate14` và tốc độ
+
+Bộ đánh giá Tầng 1 ([tools/eval_tier1_static.py](tools/eval_tier1_static.py)) chấm tất cả các trọng số độc nhất trên **toàn bộ `7.953` ảnh `val` sạch** của `../datasets/hand-keypoints` (đã loại bằng SHA-256 `38` tệp trùng byte với `train` — `27` mã băm duy nhất — và `1` tệp trùng nội bộ ngoài `train`), dùng chung cấu hình `rect=False` và chuẩn OKS mặc định của Ultralytics (`σ = 1/21`, đồng nhất với bảng tinh chỉnh phía trên). Chi tiết đầy đủ nằm tại [báo cáo Tầng 1](benchmark/results/tier1/tier1_report.md) và [kế hoạch đánh giá 3 tầng](benchmark/EVAL_PLAN.md).
+
+| Mô hình | `imgsz` | Recall@0.5 | AP@0.5 | Pose mAP50–95 (`σ=1/21`) | PCK@0.2 Box | PCK@0.2 Palm (14 khớp) | Gate14 (GT14 TP) | Tay nhỏ 36 px (Recall / PCK14)* | GPU FPS (`640×480` / `1280×720`) | CPU FPS (`640×480` / `1280×720`) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `hand_pose.pt` *(≡ `v3.pt`)* | 512 | 97,37% | 98,97% | **66,75%** | 95,52% | 89,09% | **94,88%** | 76,7% / 54,5% | 155,3 / 171,3 | 17,0 / 21,8 |
+| `hand_pose.onnx` *(≡ `v3.onnx`)* | 512 | **97,38%** | 98,97% | 66,69% | **95,53%** | **89,10%** | **94,88%** | 77,3% / 54,5% | 139,7 / 129,9 | 21,3 / 21,6 |
+| `hand_pose.pt@640` | 640 | 97,69% | 99,04% | 64,07% | 95,67% | 89,20% | 80,04% | 85,0% / 65,4% | 137,8 / 153,6 | 13,3 / 16,7 |
+| `hand_pose_v2.pt` (nano) | 640 | 96,28% | 98,64% | 66,69% | 93,55% | 86,90% | 94,75% | **93,3% / 69,9%** | 222,4 / 201,7 | 29,7 / **34,2** |
+| `hand_pose_v2.onnx` (nano) | 640 | 96,28% | 98,64% | 66,68% | 93,55% | 86,90% | 94,76% | **93,3% / 69,6%** | **245,4 / 232,4** | **32,9** / 32,7 |
+| `runs/hand_only_trial/.../best.pt` | 640 | 97,15% | 98,94% | 65,03% | 95,11% | 88,49% | 93,08% | 69,7% / 21,1% | 138,0 / 153,5 | 13,3 / 16,3 |
+
+*\*Cột 36 px là bài chẩn đoán thu nhỏ thuần (`min_source >= 64 px`, 300 ảnh trên nền xám — `SCALED DIAGNOSTIC`), không thay thế phép đo cự ly thực bằng camera. Tốc độ đo trên RTX 5050 Laptop & CPU với 20 vòng warmup + 200 khung ở đúng kích thước webcam `640×480` và `1280×720`.*
+
+**Kết luận rút ra từ Tầng 1 và giới hạn trung thực của tập `val`:**
+- **Chọn trọng số mặc định:** `hand_pose.pt` (`imgsz=512`, Top-1 Conf Recall `97,11%`) dẫn đầu về chất lượng khớp cận cảnh (`66,75%` Pose mAP50–95, `89,09%` PCK14, `94,88%` Gate14). Trên khung hình webcam thật, `.pt` dùng letterbox chữ nhật (`512×384` ở 4:3, `512×288` ở 16:9) còn `.onnx` bị khóa vuông `[1,3,512,512]`, nên ở `1280×720` bản **`hand_pose.pt` nhanh hơn `.onnx` trên GPU (`171,3` vs `129,9 FPS`) và tương đương trên CPU (`21,8` vs `21,6 FPS`)**; chỉ ở `640×480` thuần CPU thì `hand_pose.onnx` nhỉnh hơn (`21,3` vs `17,0 FPS`). Ép `hand_pose.pt` lên `640` làm rớt `Gate14` xuống `80,04%`, còn `best.pt` (tinh chỉnh 4 epoch) giảm Pose mAP50–95 xuống `65,03%` và tụt mạnh ở tay nhỏ 36 px. Riêng trên máy chỉ có CPU cần `>30 FPS` hoặc bàn tay nhỏ (`36–64 px`), `hand_pose_v2.pt`/`.onnx` (nano, `640`) đạt `66,69%` Pose mAP50–95, **`93,3%` Recall ở 36 px** và **`29,7–34,2 FPS` trên CPU**.
+- **Điểm nghẽn thực tế của `Gate14`:** Cổ tay (`wrist`, khớp `0`) chiếm tới **96% số ca bị loại bởi cổng `all(14 khớp >= 0,5)`** (`314/325` ca GT đủ 14 khớp), chủ yếu khi tay quá sát mép ảnh (`>=160 px`) làm cổ tay chạm biên.
+- **Giới hạn của tập `hand-keypoints/val` (không dùng làm điểm thực tế ngoài đời):** Tập `val` này cùng nguồn phân bố với `train`, đã được dùng để chọn checkpoint trong 25 epoch train, toàn bộ `7.953` ảnh đều là vuông `224×224`, chỉ có **2/7.953 ảnh (`0,03%`) tay `< 40 px`** (trung vị `142 px`), và quét `dHash ≤ 2` phát hiện **`6.095/7.953` ảnh `val` có ảnh rất giống (cùng bối cảnh/chuỗi khung) trong `train`**. Do đó các số liệu Tầng 1 chỉ là **kiểm định nội bộ cận cảnh**; độ chính xác theo ý định người dùng và tỷ lệ kích hoạt nhầm ngoài thực tế cần đo ở Tầng 2 & Tầng 3 trên video độc lập.
+
+Để chạy lại toàn bộ benchmark Tầng 1 (và xuất ảnh kiểm chứng bằng mắt tại `benchmark/results/tier1/audit_top20_errors/`):
+
+```bash
+python tools/eval_tier1_static.py \
+  --data ../datasets/hand-keypoints \
+  --models hand_pose.pt hand_pose.pt@640 hand_pose_v3.pt hand_pose_v2.pt hand_pose.onnx hand_pose_v3.onnx hand_pose_v2.onnx runs/hand_only_trial/fit/weights/best.pt \
+  --exclude-audit-list runs/hand_only_trial/val.txt \
+  --stress-scales 36,64 --latency-sizes 640x480,1280x720 \
+  --output benchmark/results/tier1
+```
+
 ## Kiểm chứng
 
 - **Camera di chuyển, tay đứng yên.** Bài kiểm thử chiếu cùng bàn tay xòe hoặc nắm qua 91 vị trí và góc camera liên tiếp cho mỗi tư thế. Tâm tay dịch hơn 50 pixel trên ảnh. Bộ điều khiển giữ trạng thái bay tại chỗ, lệnh vận tốc bằng 0 trong toàn bộ phép thử.
@@ -87,9 +118,10 @@ python -m pytest tests -q
 | [demo/fly_sim.py](demo/fly_sim.py) và [demo/perception.py](demo/perception.py) | Đọc camera hoặc video, nhận diện, ghi và phát lại log |
 | [dronectl](dronectl/) | Đọc cử chỉ, xác nhận lệnh theo thời gian và quản lý trạng thái bay |
 | [sim3d](sim3d/) và [sim](sim/) | Camera, bàn tay 3D và mô phỏng chuyển động của drone |
-| [tests](tests/) | Kiểm thử nhận diện, mất tín hiệu, chuyển trạng thái và hướng di chuyển |
+| [tests](tests/) | Kiểm thử nhận diện, mất tín hiệu, chuyển trạng thái, hướng di chuyển và bộ benchmark (`309` ca `pytest`) |
+| [benchmark](benchmark/) và [tools/eval_tier1_static.py](tools/eval_tier1_static.py) | Kế hoạch, schema kiểm toán và bộ benchmark Tầng 1 (lọc trùng SHA-256/dHash, PCK, Gate14, latency GPU/CPU) |
 | [tools/finetune_hand.py](tools/finetune_hand.py) | Tinh chỉnh mô hình khớp tay và so sánh hai bản trọng số |
 
-Để đối chiếu log từ bản cũ, `--replay` tự đọc chế độ đã ghi. Log đời đầu được phát bằng chế độ kết hợp tay và cơ thể. Có thể chọn lại chế độ thử nghiệm cũ bằng `--input-mode mixed`.
+Để đối chiếu log từ bản cũ, `--replay` tự đọc chế độ đã ghi. Log đời đầu được phát bằng chế độ kết hợp tay và cơ thể. Ngoài chế độ mặc định `--input-mode hand` (chỉ ngón trỏ), có thể chọn `--input-mode hand_joystick` (cần lái 4 hướng chỉ dùng bàn tay) hoặc `--input-mode mixed` (chế độ thử nghiệm cũ).
 
 Dữ liệu và phần mềm nền được dẫn riêng tại [Hand Keypoints của Ultralytics](https://docs.ultralytics.com/datasets/pose/hand-keypoints/), [HaGRID](https://github.com/hukenovs/hagrid) và [PyBullet](https://github.com/bulletphysics/bullet3).
