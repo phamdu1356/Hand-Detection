@@ -472,3 +472,25 @@ def test_stress_scales_never_upscales_and_audit_cleans_stale_and_picks_large_fns
     fn_files = sorted(p.name for p in (audit_dir / "false_negatives").glob("*.png"))
     # With max_per_cat=2 -> 1 largest (180) + 1 smallest (30)
     assert fn_files == ["01_fn_180.png", "02_fn_30.png"]
+
+
+def test_check_gate14_relaxed_wrist_conf_matches_hand_command():
+    kps = _make_hand_kps()
+    kconf = np.full(21, 0.9, dtype=np.float64)
+    kconf[0] = 0.30
+    pred = PredDet(box_xyxy=(100.0, 100.0, 220.0, 260.0), conf=0.9, kps_xy=kps, kps_conf=kconf)
+
+    # Strict default (0.50 on all 14 joints) rejects wrist=0.30
+    ok_strict, failed_strict, _ = check_gate14(pred, conf_min=0.5)
+    assert not ok_strict and failed_strict == [0]
+
+    # Relaxed wrist_conf_min=0.25 accepts wrist=0.30
+    ok_relaxed, failed_relaxed, _ = check_gate14(pred, conf_min=0.5, wrist_conf_min=0.25)
+    assert ok_relaxed and failed_relaxed == []
+
+    # Still rejects finger tip < 0.50 even when wrist_conf_min=0.25
+    kconf2 = kconf.copy()
+    kconf2[8] = 0.35
+    pred2 = PredDet(box_xyxy=pred.box_xyxy, conf=0.9, kps_xy=kps, kps_conf=kconf2)
+    ok2, failed2, _ = check_gate14(pred2, conf_min=0.5, wrist_conf_min=0.25)
+    assert not ok2 and failed2 == [8]

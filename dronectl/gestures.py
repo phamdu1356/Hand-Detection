@@ -21,6 +21,9 @@ FAR_LABELS = ("arms_up", "t_pose", "point_right", "point_left", "point_up", "poi
 _RULE_TO_NEAR = {"palm": "palm", "four": "palm", "fist": "fist", "like": "like", "ok": "ok"}
 _POINT_DIRS = {"right": 0.0, "up": 90.0, "left": 180.0, "down": -90.0}
 _FAR_NEEDED = (0, 5, 6, 7, 8, 9, 10)  # nose, shoulders, elbows, wrists (COCO)
+_CONTROL_WRIST = 0
+_CONTROL_FINGER_INDICES = (2, 4, 5, 6, 8, 9, 10, 12, 14, 16, 17, 18, 20)
+_CONTROL_INDICES = (_CONTROL_WRIST,) + _CONTROL_FINGER_INDICES
 
 
 def near_gesture(hand, cfg: ControlConfig | None = None) -> str:
@@ -56,9 +59,13 @@ def hand_command(hand, cfg: ControlConfig) -> str:
     if hand is None:
         return "none"
     # Missing tips would otherwise count as curled fingers in the shape rules.
-    indices = [0, 2, 4, 5, 6, 8, 9, 10, 12, 14, 16, 17, 18, 20]
-    pts = hand.kps[indices]
-    if (not np.all(hand.kps_conf[indices] >= cfg.hand_conf_min)
+    # Wrist (kp 0) often drops into 0.25-0.49 when close-up hands touch frame borders,
+    # so it uses cfg.wrist_conf_min while all 13 finger/MCP joints stay >= cfg.hand_conf_min.
+    kconf = np.asarray(hand.kps_conf, dtype=float)
+    pts = hand.kps[list(_CONTROL_INDICES)]
+    wrist_min = min(cfg.wrist_conf_min, cfg.hand_conf_min)
+    if (float(kconf[_CONTROL_WRIST]) < wrist_min
+            or not np.all(kconf[list(_CONTROL_FINGER_INDICES)] >= cfg.hand_conf_min)
             or not np.isfinite(pts).all() or not (pts > 0).any(axis=1).all()):
         return "none"
     shape, _, _ = analyze_hand_keypoints(hand.kps)

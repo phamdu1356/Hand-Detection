@@ -161,8 +161,17 @@ def compute_ap50(pr_records: list[tuple[float, bool]], total_gt: int) -> float:
     return float(np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]))
 
 
-def check_gate14(pred: PredDet, conf_min: float = 0.5) -> tuple[bool, list[int], float]:
-    """Mirror dronectl.gestures.hand_command's 14-keypoint validity gate verbatim."""
+def check_gate14(
+    pred: PredDet,
+    conf_min: float = 0.5,
+    wrist_conf_min: float | None = None,
+) -> tuple[bool, list[int], float]:
+    """Mirror dronectl.gestures.hand_command's 14-keypoint validity gate.
+
+    When ``wrist_conf_min`` is provided, wrist (kp 0) uses ``min(wrist_conf_min, conf_min)``
+    matching ControlConfig.wrist_conf_min while the 13 finger/MCP joints require ``conf_min``.
+    """
+    w_min = conf_min if wrist_conf_min is None else min(float(wrist_conf_min), float(conf_min))
     failed: list[int] = []
     min_c = 1.0
     for idx in CONTROL_KPT_INDICES:
@@ -170,7 +179,8 @@ def check_gate14(pred: PredDet, conf_min: float = 0.5) -> tuple[bool, list[int],
         pt = pred.kps_xy[idx]
         min_c = min(min_c, c)
         valid_pt = bool(np.isfinite(pt).all() and (pt[0] > 0.0 or pt[1] > 0.0))
-        if c < conf_min or not valid_pt:
+        thresh = w_min if idx == 0 else conf_min
+        if c < thresh or not valid_pt:
             failed.append(idx)
     return (len(failed) == 0, failed, min_c)
 

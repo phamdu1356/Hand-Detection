@@ -4,7 +4,7 @@ import pytest
 
 from dronectl.body_frame import shoulder_frame
 from dronectl.config import ControlConfig
-from dronectl.gestures import GestureFilter, far_gesture, near_gesture
+from dronectl.gestures import GestureFilter, far_gesture, hand_command, near_gesture
 from tests.synth import BodyPose, HandPose, Scene, make_observation
 
 NEAR_EXPECTED = {
@@ -47,6 +47,29 @@ def test_near_palm_survives_one_pixel_noise():
 def test_near_respects_custom_confidence_threshold():
     cfg = ControlConfig(hand_conf_min=0.95)
     assert near_gesture(_hand("palm", conf=0.9), cfg) == "none"
+
+
+def test_hand_command_relaxes_wrist_gate_while_keeping_finger_gate_strict():
+    cfg = ControlConfig()
+    # Border-clipped close-up hand: wrist confidence dips to 0.30, all 13 fingers >= 0.90 -> allowed
+    h_border = _hand("palm", conf=0.9)
+    h_border.kps_conf[0] = 0.30
+    assert hand_command(h_border, cfg) == "palm"
+
+    # Wrist below wrist_conf_min (0.25) -> still rejected
+    h_low_wrist = _hand("palm", conf=0.9)
+    h_low_wrist.kps_conf[0] = 0.15
+    assert hand_command(h_low_wrist, cfg) == "none"
+
+    # Missing wrist coordinate (0, 0) -> still rejected even with high conf
+    h_zero_wrist = _hand("palm", conf=0.9)
+    h_zero_wrist.kps[0] = (0.0, 0.0)
+    assert hand_command(h_zero_wrist, cfg) == "none"
+
+    # Any of the 13 finger/MCP joints below hand_conf_min (0.50) -> strictly rejected
+    h_low_tip = _hand("palm", conf=0.9)
+    h_low_tip.kps_conf[8] = 0.35
+    assert hand_command(h_low_tip, cfg) == "none"
 
 
 def _far(left="down", right="down", drop=(), conf=0.9, tilt=0.0, shoulder_px=160.0):

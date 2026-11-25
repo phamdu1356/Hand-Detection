@@ -16,7 +16,8 @@ class ControlConfig:
     fallback_k: float = 0.3           # fallback unit = fallback_k * hand size (no shoulders)
 
     # hand (section 4.1)
-    hand_conf_min: float = 0.5        # mean hand keypoint confidence
+    hand_conf_min: float = 0.5        # mean hand keypoint confidence and 13 finger/MCP gate
+    wrist_conf_min: float = 0.25      # relaxed wrist (kp 0) gate for border-clipped close-ups
     classifier: str = "rules"         # "rules" only until phase 4 adds "mlp"
 
     # range selection (section 6.1)
@@ -83,6 +84,10 @@ def validate(cfg: ControlConfig) -> ControlConfig:
     """Raise ValueError when the values cannot describe a working controller."""
     if cfg.classifier not in _ALLOWED_CLASSIFIERS:
         raise ValueError(f"classifier must be one of {_ALLOWED_CLASSIFIERS}, got {cfg.classifier!r}")
+    if not 0.0 <= cfg.hand_conf_min <= 1.0:
+        raise ValueError("hand_conf_min must be in [0, 1]")
+    if not 0.0 <= cfg.wrist_conf_min <= cfg.hand_conf_min:
+        raise ValueError("require 0 <= wrist_conf_min <= hand_conf_min")
     if not 0.0 < cfg.far_enter_q < cfg.near_enter_q:
         raise ValueError("require 0 < far_enter_q < near_enter_q")
     if not 0.0 < cfg.dead_xy < cfg.full_xy:

@@ -10,6 +10,7 @@ def test_defaults_match_spec_values():
     assert cfg.v_h == 1.5 and cfg.v_v == 1.0 and cfg.w_yaw_deg == 45.0
     assert cfg.ema_alpha == 0.35 and cfg.expo_alpha == 0.5
     assert cfg.classifier == "rules"
+    assert cfg.hand_conf_min == 0.5 and cfg.wrist_conf_min == 0.25
     assert cfg.takeoff_hold_near_s == 1.0 and cfg.land_hold_far_s == 1.5
 
 
@@ -61,6 +62,9 @@ def test_unsupported_classifier_is_rejected():
     {"dead_yaw_deg": 40.0},
     {"ema_alpha": 0.0},
     {"v_h": -1.0},
+    {"hand_conf_min": 1.2},
+    {"wrist_conf_min": -0.05},
+    {"wrist_conf_min": 0.6, "hand_conf_min": 0.5},
 ])
 def test_inconsistent_values_are_rejected(bad):
     with pytest.raises(ValueError):
