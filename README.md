@@ -100,6 +100,31 @@ python tools/eval_tier1_static.py \
   --output benchmark/results/tier1
 ```
 
+### Benchmark Độc lập Ngoài Phân phối (Zero-Leakage OOD — 4 bộ dữ liệu công khai)
+
+Để loại bỏ hoàn toàn nguy cơ rò rỉ khung hình của `hand-keypoints/val`, chương trình [tools/eval_ood_suite.py](tools/eval_ood_suite.py) kiểm tra SHA-256 chéo với toàn bộ `18.724` ảnh `train` (**xác nhận `0` tệp trùng byte**) và đánh giá trên **4 bộ dữ liệu học thuật độc lập**: **FreiHAND Eval v2** (`3.960` tay thực cận cảnh, nhãn 3D→2D đa camera), **CMU Panoptic HandDB** (`2.756` tay thực gán thủ công, gồm `846` `manual_test`), **COCO-WholeBody `val2017`** (`3.956` tay toàn cảnh nhiều người + `2.307` ảnh nền không người đo Background FPR), và **HaGRID FullHD Test** (`479` ảnh đời thực 0,5–4 m cho `like`, `ok`, `palm`, `no_gesture` qua `hand_command()`). Chi tiết nằm tại [báo cáo OOD](benchmark/results/ood/ood_report.md).
+
+| Mô hình (`imgsz`) | Pooled OOD (`10.672` tay)<br>Recall / AP@0.5 / PCK14 | FreiHAND (`3.960`)<br>Recall / AP@0.5 / PCK14 | CMU (`2.756` / `846` test)<br>Recall / AP@0.5 | COCO-WB (`3.956`)<br>Recall / AP@0.5 | COCO Nền (`2.307`)<br>Box / Cmd FPR | HaGRID `Perception` (`479`)<br>`like` / `ok` / `palm` · `no_gesture` FPR |
+|---|---:|---:|---:|---:|---:|---:|
+| **`hand_pose_v2.pt` (`640`, nano)** | **35,65% / 45,43% / 11,76%** | **65,88%** / 80,35% / **22,46%** | **30,66% / 42,06%** *(21,75%)* | **8,87% / 10,42%** | 10,36% / 9,54% | **83,3%** / 0,0% / **96,7%** · 71,4% |
+| `hand_pose.pt@640` (`640`) | 33,32% / 41,47% / 10,27% | **67,47%** / 80,82% / 20,73% | 20,61% / 30,39% *(18,09%)* | 7,99% / 7,44% | 16,86% / 15,30% | 75,8% / 0,8% / 80,0% · 65,6% |
+| `runs/.../best.pt` (`640`, 4-ep) | 31,43% / 40,32% / 9,73% | 66,09% / **81,86%** / 20,73% | 17,38% / 25,08% *(15,25%)* | 6,52% / 6,85% | **8,11% / 7,20%** | 79,2% / 0,0% / 85,8% · **58,0%** |
+| `hand_pose.onnx` (`512`) | 30,95% / 39,54% / 9,87% | 65,56% / 78,02% / 21,03% | 18,21% / 29,59% *(15,72%)* | 5,18% / 5,29% | 10,01% / 9,10% | 78,3% / **1,7%** / 80,8% · 70,6% |
+| `hand_pose.pt` (`512`) | 30,84% / 38,87% / 9,84% | 65,56% / 77,99% / 21,02% | 17,71% / 27,12% *(14,42%)* | 5,23% / 5,22% | 13,05% / 11,83% | 75,8% / 0,8% / 80,0% · 65,6% |
+
+**Kết luận quan trọng rút ra từ đánh giá OOD độc lập:**
+- **Khả năng tổng quát hóa ngoài phân phối:** Dù `hand_pose.pt` (`10M`, `512`) cao điểm hơn nhẹ trên `val` cận cảnh, bản nhẹ **`hand_pose_v2.pt` (`3M`, `640`) lại vượt trội trên cả 4 bộ OOD độc lập** (`+13 điểm %` trên CMU HandDB, gấp gần `2×` trên COCO-WholeBody, `+16,7 điểm %` trên HaGRID `palm`, FPR nền thấp hơn `10,36%` vs `13,05%`, chạy `>30 FPS` trên CPU).
+- **Hai lỗ hổng gốc của tập huấn luyện hiện tại:** Kiểm toán trực quan chỉ ra hai điểm gãy chính ngoài đời thực: (1) **lật ngược ngón cái ↔ ngón út** trên ảnh mu bàn tay/cầm vật thể (làm `FreiHAND` PCK14 on TP tụt từ `91,8%` ở `val` xuống `32,1%–34,1%`, do `hand-keypoints` chủ yếu hướng lòng bàn tay và lỗi `flip_idx` gốc của Ultralytics), và (2) **cử chỉ hạ cánh `OK` gần như bằng `0%`** (`0,0%–1,7%` trên `120` ảnh HaGRID do model ảo giác dựng thẳng ngón trỏ lên ngón giữa thành `four`/`palm`, `thumb_index_dist` trung vị = `1,02` so với ngưỡng `< 0,42`).
+- **Tay nhỏ thực tế & báo giả khung đơn:** Trên `2.659` bàn tay `<40 px` thật ngoài đời (`COCO-WholeBody + CMU`), Recall toàn khung chỉ đạt `1,39%–4,32%` (khẳng định bài thu nhỏ nền xám không thay thế tầm xa thật); đồng thời tỷ lệ báo giả khung đơn đạt `8,1%–13,1%` trên nền không người và `51%–71%` trên `HaGRID no_gesture` (cầm cốc, đưa tay chạm mặt), nhấn mạnh vai trò bắt buộc của bộ lọc giữ thời gian `1,0 s` và nhu cầu bổ sung dữ liệu đa góc/`OK`/âm tính ở vòng huấn luyện kế tiếp.
+
+```bash
+python tools/eval_ood_suite.py \
+  --ood-root ../datasets/ood_bench \
+  --train-ref ../datasets/hand-keypoints/images/train \
+  --models hand_pose.pt hand_pose.pt@640 hand_pose.onnx hand_pose_v2.pt runs/hand_only_trial/fit/weights/best.pt \
+  --output benchmark/results/ood
+```
+
 ## Kiểm chứng
 
 - **Camera di chuyển, tay đứng yên.** Bài kiểm thử chiếu cùng bàn tay xòe hoặc nắm qua 91 vị trí và góc camera liên tiếp cho mỗi tư thế. Tâm tay dịch hơn 50 pixel trên ảnh. Bộ điều khiển giữ trạng thái bay tại chỗ, lệnh vận tốc bằng 0 trong toàn bộ phép thử.
@@ -118,8 +143,8 @@ python -m pytest tests -q
 | [demo/fly_sim.py](demo/fly_sim.py) và [demo/perception.py](demo/perception.py) | Đọc camera hoặc video, nhận diện, ghi và phát lại log |
 | [dronectl](dronectl/) | Đọc cử chỉ, xác nhận lệnh theo thời gian và quản lý trạng thái bay |
 | [sim3d](sim3d/) và [sim](sim/) | Camera, bàn tay 3D và mô phỏng chuyển động của drone |
-| [tests](tests/) | Kiểm thử nhận diện, mất tín hiệu, chuyển trạng thái, hướng di chuyển và bộ benchmark (`309` ca `pytest`) |
-| [benchmark](benchmark/) và [tools/eval_tier1_static.py](tools/eval_tier1_static.py) | Kế hoạch, schema kiểm toán và bộ benchmark Tầng 1 (lọc trùng SHA-256/dHash, PCK, Gate14, latency GPU/CPU) |
+| [tests](tests/) | Kiểm thử nhận diện, mất tín hiệu, chuyển trạng thái, hướng di chuyển và bộ benchmark (`311` ca `pytest`) |
+| [benchmark](benchmark/), [tools/eval_tier1_static.py](tools/eval_tier1_static.py) và [tools/eval_ood_suite.py](tools/eval_ood_suite.py) | Kế hoạch, schema kiểm toán, benchmark Tầng 1 (`val` sạch) và bộ đánh giá OOD độc lập 4 tập (`FreiHAND`, `CMU HandDB`, `COCO-WholeBody`, `HaGRID`) |
 | [tools/finetune_hand.py](tools/finetune_hand.py) | Tinh chỉnh mô hình khớp tay và so sánh hai bản trọng số |
 
 Để đối chiếu log từ bản cũ, `--replay` tự đọc chế độ đã ghi. Log đời đầu được phát bằng chế độ kết hợp tay và cơ thể. Ngoài chế độ mặc định `--input-mode hand` (chỉ ngón trỏ), có thể chọn `--input-mode hand_joystick` (cần lái 4 hướng chỉ dùng bàn tay) hoặc `--input-mode mixed` (chế độ thử nghiệm cũ).

@@ -10,7 +10,7 @@ Mục tiêu là xây dựng hệ thống đánh giá **3 tầng tách bạch, t�
 
 | Bước | Phạm vi | Đầu ra chính | Trạng thái |
 |---|---|---|---|
-| **Bước 1** | **Tầng 1 — Benchmark ảnh tĩnh sạch + Schema nền tảng** | `benchmark/schema.py`, `tools/eval_tier1_static.py`, `tests/test_tier1_eval.py`, báo cáo `tier1_report.md` trên toàn bộ `7.953` ảnh sạch + `audit_top20_errors/` | **Hoàn thành & đã rà soát** (`2026-11-23`) |
+| **Bước 1** | **Tầng 1 — Benchmark ảnh tĩnh sạch + Schema nền tảng + Kiểm định OOD độc lập** | `benchmark/schema.py`, `benchmark/ood_metrics.py`, `tools/eval_tier1_static.py`, `tools/eval_ood_suite.py`, `tests/test_tier1_eval.py`, `tests/test_ood_metrics.py`, `tier1_report.md` (`7.953` ảnh `val`) + `ood_report.md` (4 tập OOD độc lập: `10.672` tay + `2.307` nền + `479` HaGRID) | **Hoàn thành & đã rà soát** (`2026-11-24`) |
 | **Bước 2** | **Công cụ quay video chuẩn & duyệt nhãn mù** | `tools/record_eval_session.py`, `tools/review_labels.py`, test kiểm chứng schema `manifest.csv` / `labels.csv` | Sẵn sàng triển khai |
 | **Bước 3** | **Tầng 2 & Tầng 3 — Bộ chấm độc lập + 24 ca kiểm thử** | `tools/score_eval.py` (Macro-F1, CM, Error Attribution 4 nhóm, Event Recall song song Decoupled & End-to-End, `FP/min`, Stop P50/P95, sai số đích, A vs B 95% CI, `failures.csv`) + `tests/test_eval_suite.py` | Chờ xong Bước 2 |
 | **Bước 4** | **Chạy Pilot (`dev`), Sim3D (`122` lượt) & Đánh giá Chính thức (`test`)** | Bộ video pilot (`70` lượt + `4` phút trung tính), mô phỏng `122` lượt, và tập test chính thức (`210–350` lượt + `12–20` phút trung tính) | Chờ xong Bước 3 |
@@ -32,7 +32,7 @@ Mục tiêu là xây dựng hệ thống đánh giá **3 tầng tách bạch, t�
 - **GPU:** NVIDIA GeForce RTX 5050 Laptop GPU (8.151 MiB VRAM), `torch 2.15.0+cu132`, CUDA sẵn sàng.
 - **ONNX Runtime:** `TensorrtExecutionProvider`, `CUDAExecutionProvider`, `CPUExecutionProvider`.
 - **Camera:** `/dev/video0` – `/dev/video3`.
-- **Bộ kiểm thử hiện có:** `309 passed` (`pytest`, gồm `21` ca tất định của Bước 1), đã cài editable qua `pyproject.toml`.
+- **Bộ kiểm thử hiện có:** `311 passed` (`pytest`, gồm `23` ca tất định cho Tầng 1 & bộ OOD), đã cài editable qua `pyproject.toml`.
 
 ### 2.3. Kiểm kê tập dữ liệu `../datasets/hand-keypoints`
 - `train`: `18.776` ảnh (`52` trùng nội bộ → `18.724` duy nhất).
