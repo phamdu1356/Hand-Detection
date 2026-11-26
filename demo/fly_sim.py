@@ -334,7 +334,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-gui", action="store_true", help="no windows (sim and camera HUD)")
     ap.add_argument("--wind", type=float, default=0.0, help="sim gust strength in m/s^2")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--pose-model", default=None, help="hand_pose.pt or .onnx")
+    ap.add_argument(
+        "--pose-model",
+        default=None,
+        help="pose model (.pt/.onnx); default auto-picks hand_pose_v4 -> hand_pose_v2 -> hand_pose",
+    )
     ap.add_argument("--body-model", default=None, help="yolo11n-pose.pt or .onnx")
     ap.add_argument("--heatmap-model", default=None)
     ap.add_argument("--far-field", choices=("auto", "always", "off"), default="auto")

@@ -57,7 +57,9 @@ class Perception:
             enable_body_pose=not hand_only,
         )
         if self.ctl.pose_model is None:
-            raise RuntimeError("no hand pose model found: pass pose_model_path (hand_pose.pt or .onnx)")
+            raise RuntimeError(
+                "no hand pose model found: pass pose_model_path (hand_pose_v4/v2/hand_pose .pt or .onnx)"
+            )
 
     def perceive(self, frame, t: float | None = None) -> Observation:
         """Run pure inference on ``frame`` (without mutating or drawing on it) and return an Observation."""

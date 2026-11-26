@@ -59,6 +59,28 @@ GESTURE_TO_CMD = {
     "like": "TAKEOFF (Cat canh)",
 }
 HEATMAP_GESTURE_CLASSES = ("palm", "fist", "ok", "one", "peace_inverted", "three", "four", "like")
+# Auto-discovery order when --pose-model is not explicitly passed:
+# prefers OOD-trained v4 (when available) -> v2 (OOD winner & 2x faster CPU) -> baseline hand_pose.
+DEFAULT_POSE_MODEL_CANDIDATES = (
+    "hand_pose_v4.pt",
+    "hand_pose_v4.onnx",
+    "hand_pose_v2.pt",
+    "hand_pose_v2.onnx",
+    "hand_pose.pt",
+    "hand_pose.onnx",
+)
+
+
+def resolve_default_pose_model(search_dirs, candidates=DEFAULT_POSE_MODEL_CANDIDATES):
+    """Return the first existing pose model path across ``search_dirs`` in priority order."""
+    for search_dir in search_dirs:
+        if not search_dir:
+            continue
+        for candidate in candidates:
+            p = os.path.join(search_dir, candidate)
+            if os.path.exists(p):
+                return p
+    return None
 
 
 def load_cnn_model(path):
@@ -468,14 +490,7 @@ class OptimalFlycamController:
             resolved_pose = pose_model_path
         else:
             demo_dir = os.path.dirname(os.path.abspath(__file__))
-            for search_dir in (base_dir, demo_dir):
-                for candidate in ("hand_pose.pt", "hand_pose.onnx"):
-                    p = os.path.join(search_dir, candidate)
-                    if os.path.exists(p):
-                        resolved_pose = p
-                        break
-                if resolved_pose:
-                    break
+            resolved_pose = resolve_default_pose_model((base_dir, demo_dir))
 
         if resolved_pose is not None:
             from ultralytics import YOLO
@@ -1262,7 +1277,11 @@ def main():
     images_dir = os.path.join(os.path.dirname(__file__), "images")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=os.path.join(base_dir, "hand_localization_model.h5"))
-    ap.add_argument("--pose-model", default=None, help="đường dẫn tới hand_pose.pt hoặc hand_pose.onnx")
+    ap.add_argument(
+        "--pose-model",
+        default=None,
+        help="đường dẫn model pose (.pt/.onnx); mặc định ưu tiên hand_pose_v4 -> hand_pose_v2 -> hand_pose",
+    )
     ap.add_argument("--body-model", default=None, help="đường dẫn tới yolo11n-pose.pt (Stage 1 ROI Locator)")
     ap.add_argument("--heatmap-model", default=None, help="đường dẫn tới hand_kpts_heatmap.onnx (Stage-2B Refiner)")
     ap.add_argument(

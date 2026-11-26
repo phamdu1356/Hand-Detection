@@ -93,6 +93,26 @@ def test_select_main_person_none_when_empty():
     assert tm.select_main_person(np.zeros((0, 4)), np.zeros((0, 17, 2)), None) is None
 
 
+def test_default_pose_model_priority_prefers_v4_then_v2_then_baseline(tmp_path):
+    d1 = tmp_path / "root"
+    d2 = tmp_path / "demo"
+    d1.mkdir()
+    d2.mkdir()
+    assert tm.resolve_default_pose_model((str(d1), str(d2))) is None
+
+    (d1 / "hand_pose.onnx").write_bytes(b"")
+    assert tm.resolve_default_pose_model((str(d1), str(d2))) == str(d1 / "hand_pose.onnx")
+
+    (d1 / "hand_pose.pt").write_bytes(b"")
+    assert tm.resolve_default_pose_model((str(d1), str(d2))) == str(d1 / "hand_pose.pt")
+
+    (d1 / "hand_pose_v2.pt").write_bytes(b"")
+    assert tm.resolve_default_pose_model((str(d1), str(d2))) == str(d1 / "hand_pose_v2.pt")
+
+    (d1 / "hand_pose_v4.pt").write_bytes(b"")
+    assert tm.resolve_default_pose_model((str(d1), str(d2))) == str(d1 / "hand_pose_v4.pt")
+
+
 def test_body_pose_runs_once_per_frame_and_fields_are_filled():
     ctl = _controller_without_weights()
     fake = FakePersonModel([[100, 50, 300, 500]], [_person_kpts(120, 60)])
